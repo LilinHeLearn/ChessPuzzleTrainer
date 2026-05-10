@@ -1,0 +1,3451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Polgár 5334 — Chess Puzzle Trainer</title>
+
+<!-- chessboard.js -->
+<link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+<!-- chess.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+
+<!-- Typography (fewer weights = faster load) -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=Cardo:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+
+<style>
+  :root {
+    --paper: #f4ead8;
+    --paper-warm: #efe2c6;
+    --paper-edge: #e6d6b3;
+    --ink: #1c1410;
+    --ink-soft: #4a3d31;
+    --ink-faded: #897760;
+    --oxblood: #6b1d1d;
+    --gold: #a87a3a;
+    --green-correct: #3d6b3a;
+    --red-incorrect: #8a2828;
+    --rule: rgba(28, 20, 16, 0.18);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: 'Cardo', 'Garamond', serif;
+    font-size: 17px;
+    line-height: 1.55;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: "";
+    position: fixed; inset: 0;
+    background-image:
+      radial-gradient(ellipse at top left, rgba(168, 122, 58, 0.08), transparent 60%),
+      radial-gradient(ellipse at bottom right, rgba(107, 29, 29, 0.05), transparent 60%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .app {
+    position: relative;
+    z-index: 1;
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 36px 32px 48px;
+  }
+
+  /* Header */
+  header.title {
+    text-align: center;
+    margin-bottom: 28px;
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 22px;
+  }
+  header.title .super {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 14px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    margin-bottom: 6px;
+    font-weight: 600;
+  }
+  header.title h1 {
+    font-family: 'Cormorant Garamond', serif;
+    font-weight: 700;
+    font-size: 48px;
+    letter-spacing: 0.02em;
+    margin: 0;
+    line-height: 1;
+  }
+  header.title h1 .num { color: var(--oxblood); }
+  header.title .sub {
+    font-style: italic;
+    font-size: 16px;
+    color: var(--ink-soft);
+    margin-top: 6px;
+  }
+
+  /* Layout */
+  .main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 380px;
+    gap: 36px;
+    align-items: start;
+  }
+  @media (max-width: 960px) { .main { grid-template-columns: 1fr; } }
+
+  /* Board */
+  .board-panel { display: flex; flex-direction: column; align-items: center; }
+
+  .board-frame {
+    position: relative;
+    background: var(--paper-warm);
+    border: 1px solid var(--paper-edge);
+    padding: 18px 18px 14px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.4) inset, 0 18px 50px -20px rgba(28,20,16,0.2);
+  }
+  .board-frame::before, .board-frame::after {
+    content: "❦";
+    position: absolute;
+    color: var(--gold);
+    font-size: 14px;
+    opacity: 0.5;
+  }
+  .board-frame::before { top: 4px; left: 8px; }
+  .board-frame::after  { bottom: 4px; right: 8px; }
+
+  .puzzle-label {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 22px;
+    font-weight: 600;
+    text-align: center;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .puzzle-label .id { color: var(--oxblood); font-weight: 700; }
+  .puzzle-label .meta {
+    font-size: 14px; font-style: italic;
+    color: var(--ink-faded); font-weight: 400;
+    font-family: 'Cardo', serif;
+  }
+
+  #board { width: 480px; max-width: 100%; }
+  @media (max-width: 540px) {
+    #board { width: 100%; }
+    .board-frame { padding: 12px 12px 10px; }
+  }
+
+  .white-1e1d7 { background: #f0e0c2 !important; color: var(--ink-soft) !important; }
+  .black-3c85d { background: #b88762 !important; color: var(--paper) !important; }
+  .highlight-correct { box-shadow: inset 0 0 0 4px rgba(61,107,58,0.85) !important; }
+  .highlight-wrong   { box-shadow: inset 0 0 0 4px rgba(138,40,40,0.85) !important; }
+  .highlight-hint    { box-shadow: inset 0 0 0 4px rgba(168,122,58,0.85) !important; }
+  .highlight-last    { box-shadow: inset 0 0 0 3px rgba(74,93,58,0.5) !important; }
+
+  /* Click-to-move highlights */
+  .highlight-selected {
+    box-shadow: inset 0 0 0 4px rgba(168,122,58,0.95) !important;
+    background: #e8c987 !important;
+  }
+  /* Legal target square: dot in center for empty, ring for capture */
+  .highlight-target {
+    position: relative;
+    cursor: pointer;
+  }
+  .highlight-target::after {
+    content: '';
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 30%; height: 30%;
+    transform: translate(-50%, -50%);
+    background: rgba(74, 93, 58, 0.55);
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 5;
+  }
+  .highlight-target-capture {
+    position: relative;
+    cursor: pointer;
+    box-shadow: inset 0 0 0 4px rgba(138,40,40,0.7) !important;
+  }
+
+  .side-bar {
+    display: flex; align-items: center; gap: 14px;
+    margin-top: 12px;
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 17px;
+    color: var(--ink-soft);
+  }
+  .side-dot {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    border: 1.5px solid var(--ink);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+  }
+  .side-dot.white { background: #f4ead8; }
+  .side-dot.black { background: #1c1410; }
+
+  /* Side panels */
+  .side-panel { display: flex; flex-direction: column; gap: 22px; }
+
+  .panel {
+    background: var(--paper-warm);
+    border: 1px solid var(--paper-edge);
+    padding: 18px 20px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.4) inset;
+  }
+  .panel h3 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 13px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    margin: 0 0 12px;
+    font-weight: 600;
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 8px;
+  }
+
+  .status { min-height: 60px; }
+  .status .headline {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 22px;
+    font-weight: 600;
+    margin-bottom: 4px;
+    line-height: 1.2;
+  }
+  .status.idle .headline { color: var(--ink-soft); font-style: italic; }
+  .status.thinking .headline { color: var(--ink-faded); font-style: italic; }
+  .status.correct .headline { color: var(--green-correct); }
+  .status.wrong .headline { color: var(--red-incorrect); }
+  .status.solved .headline { color: var(--gold); }
+  .status .detail { color: var(--ink-soft); font-size: 15px; }
+
+  .scoresheet {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 14px;
+    background: var(--paper);
+    padding: 10px 14px;
+    border: 1px dashed var(--rule);
+    min-height: 56px;
+    color: var(--ink-soft);
+  }
+  .scoresheet .empty {
+    font-style: italic; color: var(--ink-faded);
+    font-family: 'Cardo', serif;
+  }
+  .scoresheet .move-num { color: var(--ink-faded); margin-right: 3px; }
+  .scoresheet .move-w { color: var(--ink); margin-right: 8px; }
+  .scoresheet .move-b { color: var(--oxblood); margin-right: 10px; }
+
+  .btn-row {
+    display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px;
+  }
+  button {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 16px; font-weight: 600;
+    letter-spacing: 0.04em;
+    background: var(--paper);
+    color: var(--ink);
+    border: 1px solid var(--ink-soft);
+    padding: 8px 16px;
+    cursor: pointer;
+    transition: all 0.18s ease;
+    box-shadow: 0 2px 0 var(--paper-edge);
+  }
+  button:hover:not(:disabled) {
+    background: var(--ink); color: var(--paper);
+    transform: translateY(-1px);
+    box-shadow: 0 3px 0 var(--paper-edge);
+  }
+  button:active:not(:disabled) {
+    transform: translateY(1px);
+    box-shadow: 0 1px 0 var(--paper-edge);
+  }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.primary {
+    background: var(--oxblood); color: var(--paper);
+    border-color: var(--oxblood);
+  }
+  button.primary:hover:not(:disabled) {
+    background: var(--ink); border-color: var(--ink);
+  }
+  button.subtle {
+    background: transparent; border-color: var(--rule);
+    color: var(--ink-soft);
+    font-size: 14px; padding: 6px 12px;
+  }
+
+  .browse {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 14px;
+    align-items: center;
+  }
+  .browse label {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 13px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    font-weight: 600;
+  }
+  .browse select, .browse input {
+    font-family: 'Cardo', serif;
+    font-size: 16px;
+    background: var(--paper);
+    border: 1px solid var(--paper-edge);
+    padding: 6px 10px;
+    color: var(--ink);
+  }
+  .browse input[type="number"] { width: 100%; }
+  .nav-row {
+    display: flex; gap: 8px; margin-top: 14px;
+    grid-column: 1 / -1;
+  }
+  .nav-row button { flex: 1; }
+
+  .progress {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 14px;
+    color: var(--ink-soft);
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--rule);
+  }
+  .progress .num {
+    font-family: ui-monospace, monospace;
+    color: var(--ink); font-weight: 600;
+  }
+  .engine-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-style: italic;
+    font-size: 13px;
+    color: var(--ink-faded);
+  }
+  .engine-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--ink-faded);
+    transition: background 0.3s;
+  }
+  .engine-dot.ready { background: var(--green-correct); }
+  .engine-dot.thinking { background: var(--gold); animation: pulse 1.2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  footer {
+    margin-top: 40px;
+    text-align: center;
+    font-style: italic;
+    font-size: 13px;
+    color: var(--ink-faded);
+    border-top: 1px solid var(--rule);
+    padding-top: 16px;
+  }
+
+  /* Solved badge */
+  .solved-tag {
+    display: inline-block;
+    font-family: 'Cormorant Garamond', serif;
+    font-style: italic;
+    font-size: 13px;
+    color: var(--green-correct);
+    border: 1px solid var(--green-correct);
+    padding: 1px 8px;
+    border-radius: 12px;
+  }
+
+  /* Reinforcement: practice round banner */
+  .reinforce-banner {
+    background: linear-gradient(135deg, rgba(168, 122, 58, 0.1), rgba(107, 29, 29, 0.05));
+    border: 1px solid var(--gold);
+    border-left: 4px solid var(--oxblood);
+    padding: 10px 14px;
+    margin-bottom: 4px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.4) inset;
+  }
+  .rb-track {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 14px;
+  }
+  .rb-label {
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--oxblood);
+    font-weight: 600;
+    font-size: 12px;
+  }
+  .rb-progress {
+    font-family: ui-monospace, monospace;
+    color: var(--ink);
+    font-weight: 600;
+    font-size: 16px;
+  }
+  .rb-score {
+    color: var(--green-correct);
+    font-weight: 600;
+    font-size: 14px;
+    font-family: ui-monospace, monospace;
+  }
+  .rb-hint {
+    margin-top: 4px;
+    font-style: italic;
+    font-size: 12px;
+    color: var(--ink-faded);
+    font-family: 'Cardo', serif;
+  }
+
+  /* Reinforcement: practice offer card after a miss */
+  .reinforce-card {
+    margin-top: 12px;
+    padding: 12px 14px;
+    background: rgba(168, 122, 58, 0.08);
+    border: 1px dashed var(--gold);
+    border-radius: 4px;
+  }
+  .reinforce-headline {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 2px;
+  }
+  .reinforce-detail {
+    font-size: 14px;
+    color: var(--ink-soft);
+    margin-bottom: 10px;
+    font-style: italic;
+  }
+  .reinforce-card button {
+    width: 100%;
+  }
+  .missed-tag {
+    display: inline-block;
+    font-family: 'Cormorant Garamond', serif;
+    font-style: italic;
+    font-size: 13px;
+    color: var(--red-incorrect);
+    border: 1px solid var(--red-incorrect);
+    background: rgba(138, 40, 40, 0.05);
+    padding: 1px 8px;
+    border-radius: 12px;
+  }
+  .wrong-book-stat {
+    font-family: ui-monospace, monospace;
+    color: var(--red-incorrect);
+    font-weight: 600;
+  }
+  .wrong-book-empty {
+    text-align: center;
+    padding: 24px 12px;
+    color: var(--ink-faded);
+    font-style: italic;
+    font-family: 'Cardo', serif;
+  }
+
+  /* Loading overlay */
+  .boot-overlay {
+    position: fixed;
+    inset: 0;
+    background: var(--paper);
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    transition: opacity 0.4s ease;
+  }
+  .boot-overlay.fade { opacity: 0; pointer-events: none; }
+  .boot-overlay h2 {
+    font-family: 'Cormorant Garamond', serif;
+    font-weight: 700;
+    font-size: 36px;
+    margin: 0;
+    color: var(--ink);
+  }
+  .boot-overlay p {
+    font-style: italic;
+    color: var(--ink-faded);
+    margin: 0;
+  }
+  .boot-spinner {
+    width: 36px; height: 36px;
+    border: 3px solid var(--paper-warm);
+    border-top-color: var(--oxblood);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .status.changed { animation: fadeIn 0.25s ease; }
+
+  /* ====== Profile bar ====== */
+  .profile-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 18px;
+    margin-bottom: 16px;
+    background: var(--paper-warm);
+    border: 1px solid var(--paper-edge);
+    border-left: 4px solid var(--oxblood);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.4) inset;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .profile-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .profile-label {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 13px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    font-weight: 600;
+  }
+  .profile-select {
+    font-family: 'Cardo', serif;
+    font-size: 17px;
+    background: var(--paper);
+    border: 1px solid var(--paper-edge);
+    padding: 5px 10px;
+    color: var(--ink);
+    min-width: 140px;
+  }
+  button.small {
+    font-size: 13px;
+    padding: 4px 10px;
+  }
+  .profile-right {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+  }
+  .stat-block {
+    text-align: center;
+  }
+  .stat-label {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    font-weight: 600;
+  }
+  .stat-value {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--ink);
+    line-height: 1.2;
+  }
+  .stat-value.rating { color: var(--oxblood); }
+  .stat-value.limit-hit { color: var(--red-incorrect); }
+
+  /* ====== Modal ====== */
+  .modal-backdrop {
+    position: fixed; inset: 0;
+    background: rgba(28, 20, 16, 0.5);
+    z-index: 200;
+    display: flex; align-items: center; justify-content: center;
+    animation: fadeIn 0.2s ease;
+  }
+  .modal {
+    background: var(--paper);
+    border: 1px solid var(--paper-edge);
+    box-shadow: 0 30px 80px -20px rgba(28, 20, 16, 0.5);
+    width: 560px;
+    max-width: 92vw;
+    max-height: 90vh;
+    overflow-y: auto;
+  }
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--paper-warm);
+  }
+  .modal-header h2 {
+    font-family: 'Cormorant Garamond', serif;
+    font-weight: 700;
+    font-size: 22px;
+    margin: 0;
+    color: var(--ink);
+  }
+  .modal-close {
+    background: none;
+    border: none;
+    font-size: 28px;
+    color: var(--ink-faded);
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+    box-shadow: none;
+  }
+  .modal-close:hover {
+    background: none;
+    color: var(--oxblood);
+    transform: none;
+    box-shadow: none;
+  }
+  .modal-body {
+    padding: 20px;
+  }
+  .modal-section {
+    margin-bottom: 22px;
+  }
+  .modal-section h3 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 13px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-faded);
+    margin: 0 0 10px;
+    font-weight: 600;
+  }
+  .modal-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .modal-row label {
+    font-family: 'Cardo', serif;
+    color: var(--ink-soft);
+  }
+  .modal-row input[type="text"], .modal-row input[type="number"] {
+    font-family: 'Cardo', serif;
+    font-size: 16px;
+    background: var(--paper-warm);
+    border: 1px solid var(--paper-edge);
+    padding: 6px 10px;
+    color: var(--ink);
+    flex: 1;
+    max-width: 180px;
+  }
+  .modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--rule);
+  }
+  .modal-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 20px;
+    background: var(--paper-warm);
+    padding: 12px 16px;
+    border-left: 3px solid var(--gold);
+  }
+  .modal-stats div {
+    display: flex;
+    justify-content: space-between;
+    font-family: 'Cardo', serif;
+    color: var(--ink-soft);
+  }
+  .modal-stats div span:last-child {
+    font-family: ui-monospace, monospace;
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .danger-zone {
+    background: rgba(138, 40, 40, 0.05);
+    border: 1px dashed rgba(138, 40, 40, 0.3);
+    padding: 14px;
+    margin-top: 8px;
+  }
+  .danger-zone button {
+    background: var(--paper);
+    border-color: var(--red-incorrect);
+    color: var(--red-incorrect);
+  }
+  .danger-zone button:hover:not(:disabled) {
+    background: var(--red-incorrect);
+    color: var(--paper);
+  }
+
+  /* My Puzzles toolbar (custom puzzle controls) */
+  .my-puzzles-bar {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--rule);
+    flex-wrap: wrap;
+  }
+
+  /* === Add-puzzle modal: tabs === */
+  .ap-tabs {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: 16px;
+  }
+  .ap-tab {
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom: none;
+    color: var(--ink-faded);
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 8px 14px;
+    margin-bottom: -1px;
+    cursor: pointer;
+    box-shadow: none;
+  }
+  .ap-tab:hover:not(.ap-tab-active) {
+    color: var(--ink);
+    background: rgba(168, 122, 58, 0.06);
+    transform: none;
+    box-shadow: none;
+  }
+  .ap-tab-active {
+    color: var(--oxblood) !important;
+    background: var(--paper) !important;
+    border-color: var(--rule) !important;
+    border-bottom-color: var(--paper) !important;
+  }
+  .ap-pane { display: none; }
+  .ap-pane-active { display: block; }
+
+  /* === Image drop zone === */
+  .ap-img-drop {
+    border: 2px dashed var(--paper-edge);
+    background: var(--paper-warm);
+    padding: 24px 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    color: var(--ink-soft);
+    font-family: 'Cardo', serif;
+    border-radius: 4px;
+  }
+  .ap-img-drop:hover, .ap-img-drop.drag-over {
+    border-color: var(--oxblood);
+    background: rgba(107, 29, 29, 0.04);
+  }
+  #ap-img-preview {
+    border: 1px solid var(--paper-edge);
+  }
+
+  /* === Editor board === */
+  .ed-board {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    border: 2px solid var(--ink-soft);
+    width: 100%;
+    max-width: 360px;
+    aspect-ratio: 1;
+    margin: 0 auto;
+    user-select: none;
+  }
+  .ed-sq {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 28px;
+    line-height: 1;
+    transition: background 0.1s;
+  }
+  .ed-sq:hover { filter: brightness(0.95); }
+  .ed-light { background: #f0e0c2; }
+  .ed-dark  { background: #b88762; }
+  .ed-w { color: #fefefa; text-shadow: 0 0 2px #000, 0 0 2px #000; }
+  .ed-b { color: #1c1410; text-shadow: 0 0 1px #fff; }
+  .ed-unknown { opacity: 0.5; font-size: 22px; }
+  .ed-unknown.ed-w { color: #fefefa; }
+  .ed-unknown.ed-b { color: #1c1410; }
+
+  .ed-files {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    max-width: 360px;
+    margin: 4px auto 0;
+    text-align: center;
+    font-size: 12px;
+    color: var(--ink-faded);
+    font-family: ui-monospace, monospace;
+  }
+
+  /* === Piece tray === */
+  .ed-piece-tray {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 10px;
+    justify-content: center;
+  }
+  .ed-pbtn {
+    width: 38px; height: 38px;
+    background: var(--paper-warm);
+    border: 1px solid var(--paper-edge);
+    color: var(--ink);
+    font-size: 22px;
+    line-height: 1;
+    padding: 0;
+    cursor: pointer;
+    box-shadow: none;
+    font-family: serif;
+  }
+  .ed-pbtn-b { color: var(--ink); }
+  .ed-pbtn:hover:not(:disabled):not(.ed-pbtn-active) {
+    background: var(--paper);
+    transform: none;
+    box-shadow: none;
+  }
+  .ed-pbtn-active {
+    background: var(--oxblood) !important;
+    color: var(--paper) !important;
+    border-color: var(--oxblood);
+    box-shadow: 0 2px 0 var(--ink);
+  }
+  .ed-pbtn-erase { font-size: 16px; }
+  .ed-tray-sep {
+    width: 1px;
+    height: 28px;
+    background: var(--rule);
+    margin: 0 4px;
+  }
+
+  /* === Editor toolbar === */
+  .ed-toolbar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 12px;
+    justify-content: center;
+  }
+  .ed-side-toggle {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    margin-left: auto;
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 13px;
+    color: var(--ink-faded);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+  .ed-sbtn {
+    background: var(--paper-warm);
+    border: 1px solid var(--paper-edge);
+    padding: 4px 10px;
+    font-size: 13px;
+    box-shadow: none;
+  }
+  .ed-sbtn-active {
+    background: var(--oxblood) !important;
+    color: var(--paper) !important;
+    border-color: var(--oxblood) !important;
+  }
+
+  .ed-status {
+    margin-top: 10px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-family: 'Cardo', serif;
+    border-left: 3px solid var(--ink-faded);
+    background: var(--paper-warm);
+  }
+  .ed-status.ok { border-left-color: var(--green-correct); color: var(--green-correct); }
+  .ed-status.warn { border-left-color: var(--gold); color: var(--ink-soft); }
+  .ed-status.err { border-left-color: var(--red-incorrect); color: var(--red-incorrect); }
+
+  /* Daily limit lockout overlay (within the position panel) */
+  .limit-overlay {
+    background: rgba(168, 122, 58, 0.1);
+    border: 1px solid var(--gold);
+    padding: 14px;
+    margin-top: 12px;
+    text-align: center;
+    font-family: 'Cormorant Garamond', serif;
+  }
+  .limit-overlay .head {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--oxblood);
+    margin-bottom: 4px;
+  }
+  .limit-overlay .body {
+    font-size: 14px;
+    color: var(--ink-soft);
+    font-style: italic;
+  }
+</style>
+</head>
+
+<body>
+
+<!-- Loading overlay -->
+<div class="boot-overlay" id="boot-overlay">
+  <div class="boot-spinner"></div>
+  <h2 id="boot-text">Opening the book…</h2>
+  <p id="boot-detail">Loading 4,462 puzzles</p>
+</div>
+
+<div class="app">
+
+<!-- Profile bar: who's playing, rating, daily progress -->
+<div class="profile-bar" id="profile-bar">
+  <div class="profile-left">
+    <label class="profile-label">Player</label>
+    <select id="sel-profile" class="profile-select"></select>
+    <button class="subtle small" id="btn-new-profile">+ New</button>
+    <button class="subtle small" id="btn-profile-settings">⚙ Settings</button>
+  </div>
+  <div class="profile-right">
+    <div class="stat-block">
+      <div class="stat-label">Rating</div>
+      <div class="stat-value" id="stat-rating">—</div>
+    </div>
+    <div class="stat-block">
+      <div class="stat-label">Today</div>
+      <div class="stat-value" id="stat-today">— / —</div>
+    </div>
+    <div class="stat-block">
+      <div class="stat-label">Streak</div>
+      <div class="stat-value" id="stat-streak">—</div>
+    </div>
+  </div>
+</div>
+
+<header class="title">
+  <div class="super">László Polgár · The Universal Encyclopedia of Chess</div>
+  <h1>5334<span class="num"> · </span>Problems &amp; Combinations</h1>
+  <div class="sub">A puzzle trainer with engine verification</div>
+</header>
+
+<div class="main">
+
+  <div class="board-panel">
+    <div class="puzzle-label">
+      <span class="id" id="puzzle-id">№ —</span>
+      <span class="meta" id="puzzle-meta">Loading…</span>
+      <span id="solved-badge"></span>
+    </div>
+    <div class="board-frame"><div id="board"></div></div>
+    <div class="side-bar">
+      <span class="side-dot" id="side-dot"></span>
+      <span id="side-label">to move and mate</span>
+    </div>
+  </div>
+
+  <div class="side-panel">
+
+    <!-- Reinforcement progress banner (shown only during practice mode) -->
+    <div id="reinforce-banner" class="reinforce-banner" style="display:none;"></div>
+
+    <div class="panel">
+      <h3>The Position</h3>
+      <div class="status idle" id="status">
+        <div class="headline">Ready when you are.</div>
+        <div class="detail">Drag a piece to make your move.</div>
+      </div>
+      <!-- Reinforcement offer (shown after a missed first attempt) -->
+      <div id="reinforce-offer"></div>
+      <div class="btn-row">
+        <button id="btn-hint">Hint</button>
+        <button id="btn-solution" class="subtle">Show solution</button>
+        <button id="btn-reset" class="subtle">Reset</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Score-sheet</h3>
+      <div class="scoresheet" id="scoresheet"><span class="empty">No moves yet.</span></div>
+    </div>
+
+    <div class="panel">
+      <h3>Browse</h3>
+      <div class="browse">
+        <label for="sel-section">Section</label>
+        <select id="sel-section">
+          <option value="all">All puzzles (5,333)</option>
+          <option value="1" selected>Mate in 1 (306)</option>
+          <option value="2">Mate in 2 (3,412)</option>
+          <option value="3">Mate in 3 (744)</option>
+          <option value="miniature">600 Miniatures (600)</option>
+          <option value="win">Endgame Wins (102)</option>
+          <option value="draw">Endgame Draws (42)</option>
+          <option value="polgar">Polgár Sisters (127)</option>
+          <option value="wrongbook">📕 Wrong Book — review</option>
+          <option value="mypuzzles">📓 My Puzzles — saved positions</option>
+        </select>
+
+        <label for="inp-puzzle">Puzzle №</label>
+        <input id="inp-puzzle" type="number" min="1" max="5333" value="1">
+
+        <div class="nav-row">
+          <button id="btn-prev">← Previous</button>
+          <button id="btn-random" class="primary">Random</button>
+          <button id="btn-next">Next →</button>
+        </div>
+
+        <!-- Custom puzzles toolbar (visible only when My Puzzles section is selected) -->
+        <div class="my-puzzles-bar" id="my-puzzles-bar" style="display:none; grid-column: 1 / -1;">
+          <button id="btn-add-puzzle" class="primary">+ Add puzzle</button>
+          <button id="btn-edit-puzzle" class="subtle">Edit current</button>
+          <button id="btn-delete-puzzle" class="subtle">Delete current</button>
+        </div>
+      </div>
+      <div class="progress">
+        <span>Solved: <span class="num" id="solved-count">0</span> · Wrong Book: <span class="wrong-book-stat" id="missed-count">0</span></span>
+        <span class="engine-pill">
+          <span class="engine-dot" id="engine-dot"></span>
+          <span id="engine-status">Engine starting…</span>
+        </span>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+
+<footer>
+  Positions decoded from the LaTeX <code>skak</code> source of Polgár's
+  <em>Chess: 5334 Problems, Combinations &amp; Games</em>.<br>
+  Move verification by Stockfish (with a JS fallback). Built with care for chess students everywhere.
+</footer>
+
+</div>
+
+<!-- Profile settings modal -->
+<div class="modal-backdrop" id="modal-backdrop" style="display:none;">
+  <div class="modal" id="modal">
+    <div class="modal-header">
+      <h2 id="modal-title">Profile settings</h2>
+      <button class="modal-close" id="btn-modal-close">×</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<!-- Bundled puzzle data -->
+<script src="puzzles_data.js"></script>
+
+<script>
+(() => {
+
+const $ = sel => document.querySelector(sel);
+
+// ============================================================
+// State
+// ============================================================
+const state = {
+  puzzles: [],
+  byId: new Map(),
+  current: null,
+  game: null,
+  board: null,
+  history: [],
+  solved: new Set(),
+  missed: new Set(),
+  attemptCount: 0,
+  firstAttemptScored: false,
+  ui: 'loading',
+  filter: '1',
+  selectedSquare: null,
+  legalTargets: null,
+  reinforce: null,
+  // User profile system
+  profile: null,        // current profile object (see Profile schema below)
+  profiles: {},         // map of profileName -> profile
+  // Engine
+  sf: null,
+  sfReady: false,
+  sfBusy: false,
+  sfQueue: [],
+};
+
+// ============================================================
+// Profile schema:
+//   {
+//     name: string,
+//     created: ISO date string,
+//     rating: number (starts 1000),
+//     solved: [puzzle_id, ...],   // first-try clean solves
+//     missed: [puzzle_id, ...],   // wrong book
+//     dailyLimit: number,         // 0 = unlimited
+//     dailyHistory: { 'YYYY-MM-DD': {attempts, correct, wrong} },
+//     totalAttempts: number,
+//     totalCorrect: number,
+//     totalWrong: number,
+//     bestStreak: number,
+//     currentStreak: number,
+//   }
+// ============================================================
+
+// Simple flat rating: +5 correct, -5 wrong (per user preference)
+function ratingDeltaFor(puzzle, isCorrect) {
+  return isCorrect ? 5 : -5;
+}
+
+function todayKey() {
+  const d = new Date();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+function emptyProfile(name) {
+  return {
+    name,
+    created: new Date().toISOString(),
+    rating: 1000,
+    solved: [],
+    missed: [],
+    dailyLimit: 0,  // 0 = unlimited
+    dailyHistory: {},
+    totalAttempts: 0,
+    totalCorrect: 0,
+    totalWrong: 0,
+    bestStreak: 0,
+    currentStreak: 0,
+    myPuzzles: [],  // user's own collection of saved puzzles
+  };
+}
+
+// ============================================================
+// Profile storage
+// ============================================================
+const PROFILES_KEY = 'polgar5334:profiles';
+const ACTIVE_KEY = 'polgar5334:activeProfile';
+
+function loadProfiles() {
+  try {
+    const raw = localStorage.getItem(PROFILES_KEY);
+    if (raw) state.profiles = JSON.parse(raw);
+  } catch (e) {}
+  // Migrate legacy data (from before profiles)
+  try {
+    const legacySolved = localStorage.getItem('polgar5334:solved');
+    const legacyMissed = localStorage.getItem('polgar5334:missed');
+    if ((legacySolved || legacyMissed) && Object.keys(state.profiles).length === 0) {
+      const p = emptyProfile('Player 1');
+      if (legacySolved) p.solved = JSON.parse(legacySolved);
+      if (legacyMissed) p.missed = JSON.parse(legacyMissed);
+      state.profiles[p.name] = p;
+      saveProfiles();
+      // Don't delete legacy keys yet, in case the user wants to recover
+    }
+  } catch (e) {}
+}
+
+function saveProfiles() {
+  try {
+    localStorage.setItem(PROFILES_KEY, JSON.stringify(state.profiles));
+  } catch (e) {}
+}
+
+function setActiveProfile(name) {
+  state.profile = state.profiles[name];
+  state.solved = new Set(state.profile.solved);
+  state.missed = new Set(state.profile.missed);
+  // Backfill myPuzzles for older profiles
+  if (!state.profile.myPuzzles) state.profile.myPuzzles = [];
+  syncMyPuzzlesIntoIndex();
+  try { localStorage.setItem(ACTIVE_KEY, name); } catch (e) {}
+  renderProfileUI();
+}
+
+function syncMyPuzzlesIntoIndex() {
+  // Remove any previously-loaded custom puzzles from the byId map and
+  // add only this profile's collection. (Custom puzzles use ids >= 100000.)
+  if (!state.byId) return;
+  for (const id of [...state.byId.keys()]) {
+    if (id >= 100000) state.byId.delete(id);
+  }
+  if (state.profile && state.profile.myPuzzles) {
+    for (const p of state.profile.myPuzzles) {
+      state.byId.set(p.i, p);
+    }
+  }
+}
+
+function loadActiveProfile() {
+  let activeName = null;
+  try { activeName = localStorage.getItem(ACTIVE_KEY); } catch (e) {}
+  if (activeName && state.profiles[activeName]) {
+    setActiveProfile(activeName);
+  } else {
+    // Pick first profile or create default
+    const names = Object.keys(state.profiles);
+    if (names.length > 0) {
+      setActiveProfile(names[0]);
+    } else {
+      // Create default profile
+      const p = emptyProfile('Player 1');
+      state.profiles[p.name] = p;
+      saveProfiles();
+      setActiveProfile(p.name);
+    }
+  }
+}
+
+function saveProgress() {
+  // Sync state.solved/missed back into the profile, then save
+  if (!state.profile) return;
+  state.profile.solved = [...state.solved];
+  state.profile.missed = [...state.missed];
+  state.profiles[state.profile.name] = state.profile;
+  saveProfiles();
+}
+
+// Increment daily counters and return whether the user has hit the daily limit
+function recordAttempt(puzzle, isCorrect) {
+  if (!state.profile) return { limitHit: false };
+  const today = todayKey();
+  if (!state.profile.dailyHistory[today]) {
+    state.profile.dailyHistory[today] = { attempts: 0, correct: 0, wrong: 0 };
+  }
+  const day = state.profile.dailyHistory[today];
+  day.attempts++;
+  state.profile.totalAttempts++;
+  if (isCorrect) {
+    day.correct++;
+    state.profile.totalCorrect++;
+    state.profile.currentStreak++;
+    if (state.profile.currentStreak > state.profile.bestStreak) {
+      state.profile.bestStreak = state.profile.currentStreak;
+    }
+  } else {
+    day.wrong++;
+    state.profile.totalWrong++;
+    state.profile.currentStreak = 0;
+  }
+  // Apply rating delta
+  state.profile.rating = Math.max(0, state.profile.rating + ratingDeltaFor(puzzle, isCorrect));
+  saveProgress();
+  renderProfileUI();
+  // Check daily limit
+  const limit = state.profile.dailyLimit;
+  return { limitHit: limit > 0 && day.attempts >= limit };
+}
+
+function isDailyLimitHit() {
+  if (!state.profile) return false;
+  const limit = state.profile.dailyLimit;
+  if (!limit) return false;
+  const today = todayKey();
+  const day = state.profile.dailyHistory[today];
+  return day && day.attempts >= limit;
+}
+
+// ============================================================
+// Profile UI
+// ============================================================
+function renderProfileUI() {
+  if (!state.profile) return;
+  // Profile dropdown
+  const sel = $('#sel-profile');
+  if (sel) {
+    sel.innerHTML = '';
+    Object.keys(state.profiles).sort().forEach(name => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      if (name === state.profile.name) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+  // Rating
+  const rEl = $('#stat-rating');
+  if (rEl) {
+    rEl.textContent = state.profile.rating;
+    rEl.className = 'stat-value rating';
+  }
+  // Today's progress
+  const today = todayKey();
+  const day = state.profile.dailyHistory[today] || { attempts: 0 };
+  const limit = state.profile.dailyLimit;
+  const tEl = $('#stat-today');
+  if (tEl) {
+    if (limit > 0) {
+      tEl.textContent = day.attempts + ' / ' + limit;
+      tEl.className = 'stat-value' + (day.attempts >= limit ? ' limit-hit' : '');
+    } else {
+      tEl.textContent = day.attempts + ' (∞)';
+      tEl.className = 'stat-value';
+    }
+  }
+  // Streak
+  const sEl = $('#stat-streak');
+  if (sEl) {
+    sEl.textContent = state.profile.currentStreak;
+  }
+  // Solved/missed counters
+  if ($('#solved-count')) $('#solved-count').textContent = state.solved.size;
+  if ($('#missed-count')) $('#missed-count').textContent = state.missed.size;
+}
+
+function showDailyLimitNotice() {
+  if (!isDailyLimitHit()) return;
+  setStatus('idle', 'Daily limit reached.',
+    `You've finished today's ${state.profile.dailyLimit} puzzles. Come back tomorrow, or change the limit in Settings.`);
+}
+
+// ============================================================
+// Modal: profile creation, settings, deletion
+// ============================================================
+function openModal(title, bodyHtml, onMounted) {
+  $('#modal-title').textContent = title;
+  $('#modal-body').innerHTML = bodyHtml;
+  $('#modal-backdrop').style.display = 'flex';
+  if (onMounted) onMounted();
+}
+
+function closeModal() {
+  $('#modal-backdrop').style.display = 'none';
+}
+
+function openNewProfileModal() {
+  openModal('Create new profile',
+    `<div class="modal-section">
+      <p style="color:var(--ink-soft);font-style:italic;margin-top:0;">
+        Enter a name for the new player. Profiles are stored in this browser only.
+      </p>
+      <div class="modal-row">
+        <label for="np-name">Name</label>
+        <input type="text" id="np-name" maxlength="20" placeholder="e.g. Anna" autofocus>
+      </div>
+      <div class="modal-row">
+        <label for="np-limit">Daily puzzle limit (0 = no limit)</label>
+        <input type="number" id="np-limit" min="0" max="500" value="20">
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="subtle" id="np-cancel">Cancel</button>
+      <button class="primary" id="np-create">Create</button>
+    </div>`,
+    () => {
+      $('#np-name').focus();
+      $('#np-cancel').addEventListener('click', closeModal);
+      $('#np-create').addEventListener('click', () => {
+        const name = $('#np-name').value.trim();
+        if (!name) { alert('Please enter a name.'); return; }
+        if (state.profiles[name]) { alert('A profile with that name already exists.'); return; }
+        const limit = parseInt($('#np-limit').value, 10) || 0;
+        const p = emptyProfile(name);
+        p.dailyLimit = limit;
+        state.profiles[name] = p;
+        saveProfiles();
+        setActiveProfile(name);
+        closeModal();
+      });
+      $('#np-name').addEventListener('keydown', e => { if (e.key === 'Enter') $('#np-create').click(); });
+    }
+  );
+}
+
+function openSettingsModal() {
+  if (!state.profile) return;
+  const p = state.profile;
+  const accuracy = p.totalAttempts > 0
+    ? Math.round(100 * p.totalCorrect / p.totalAttempts)
+    : 0;
+  openModal(`${p.name} \u2014 Settings`,
+    `<div class="modal-section">
+      <h3>Daily limit</h3>
+      <div class="modal-row">
+        <label>Puzzles per day (0 = unlimited)</label>
+        <input type="number" id="set-limit" min="0" max="500" value="${p.dailyLimit}">
+      </div>
+    </div>
+
+    <div class="modal-section">
+      <h3>Profile name</h3>
+      <div class="modal-row">
+        <label>Rename</label>
+        <input type="text" id="set-name" maxlength="20" value="${p.name.replace(/"/g, '&quot;')}">
+      </div>
+    </div>
+
+    <div class="modal-section">
+      <h3>Lifetime stats</h3>
+      <div class="modal-stats">
+        <div><span>Rating</span><span>${p.rating}</span></div>
+        <div><span>Best streak</span><span>${p.bestStreak}</span></div>
+        <div><span>Total attempts</span><span>${p.totalAttempts}</span></div>
+        <div><span>Accuracy</span><span>${accuracy}%</span></div>
+        <div><span>Solved on first try</span><span>${p.solved.length}</span></div>
+        <div><span>Wrong Book size</span><span>${p.missed.length}</span></div>
+      </div>
+    </div>
+
+    <div class="modal-section">
+      <h3>Reset</h3>
+      <div class="danger-zone">
+        <p style="margin:0 0 10px;color:var(--ink-soft);font-size:14px;">
+          These actions cannot be undone.
+        </p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button id="set-clear-wrong">Clear Wrong Book</button>
+          <button id="set-clear-solved">Clear Solved record</button>
+          <button id="set-reset-all">Reset everything</button>
+          <button id="set-delete">Delete profile</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="subtle" id="set-cancel">Cancel</button>
+      <button class="primary" id="set-save">Save</button>
+    </div>`,
+    () => {
+      $('#set-cancel').addEventListener('click', closeModal);
+      $('#set-save').addEventListener('click', () => {
+        const newLimit = parseInt($('#set-limit').value, 10) || 0;
+        const newName = $('#set-name').value.trim();
+        if (!newName) { alert('Name cannot be empty.'); return; }
+        if (newName !== p.name) {
+          if (state.profiles[newName]) { alert('A profile with that name already exists.'); return; }
+          // Rename
+          delete state.profiles[p.name];
+          p.name = newName;
+          state.profiles[newName] = p;
+        }
+        p.dailyLimit = newLimit;
+        saveProfiles();
+        try { localStorage.setItem(ACTIVE_KEY, p.name); } catch (e) {}
+        renderProfileUI();
+        closeModal();
+      });
+      $('#set-clear-wrong').addEventListener('click', () => {
+        if (!confirm('Clear all puzzles from your Wrong Book?')) return;
+        p.missed = [];
+        state.missed = new Set();
+        saveProgress();
+        renderProfileUI();
+        updateSolvedBadge();
+        closeModal();
+      });
+      $('#set-clear-solved').addEventListener('click', () => {
+        if (!confirm('Clear your solved-on-first-try record?')) return;
+        p.solved = [];
+        state.solved = new Set();
+        saveProgress();
+        renderProfileUI();
+        updateSolvedBadge();
+        closeModal();
+      });
+      $('#set-reset-all').addEventListener('click', () => {
+        if (!confirm('Reset rating to 1000 and clear ALL records (solved, wrong book, history)?')) return;
+        const fresh = emptyProfile(p.name);
+        fresh.dailyLimit = p.dailyLimit;
+        state.profiles[p.name] = fresh;
+        state.profile = fresh;
+        state.solved = new Set();
+        state.missed = new Set();
+        saveProfiles();
+        renderProfileUI();
+        updateSolvedBadge();
+        closeModal();
+      });
+      $('#set-delete').addEventListener('click', () => {
+        if (!confirm(`Delete profile "${p.name}" permanently?`)) return;
+        delete state.profiles[p.name];
+        saveProfiles();
+        // Switch to another profile or create default
+        const names = Object.keys(state.profiles);
+        if (names.length > 0) {
+          setActiveProfile(names[0]);
+        } else {
+          const fresh = emptyProfile('Player 1');
+          state.profiles[fresh.name] = fresh;
+          saveProfiles();
+          setActiveProfile(fresh.name);
+        }
+        closeModal();
+      });
+    }
+  );
+}
+
+// ============================================================
+// My Puzzles: user's own collection
+// ============================================================
+
+function nextCustomPuzzleId() {
+  // Custom IDs start at 100000 to avoid collision with the 5333 book puzzles
+  let max = 99999;
+  if (state.profile && state.profile.myPuzzles) {
+    for (const p of state.profile.myPuzzles) {
+      if (p.i > max) max = p.i;
+    }
+  }
+  return max + 1;
+}
+
+function validateAndBuildCustomPuzzle({fen, firstMove, mainLine, kind, mateIn, label, source}) {
+  // Validate FEN
+  let board;
+  try {
+    board = new Chess(fen);
+  } catch (e) {
+    return { error: 'Invalid FEN: ' + e.message };
+  }
+  // chess.js does not throw on invalid FEN — it silently fails. Check by validating with .fen()
+  if (board.fen() === '8/8/8/8/8/8/8/8 w - - 0 1' && fen.split(' ')[0] !== '8/8/8/8/8/8/8/8') {
+    return { error: 'Invalid FEN — chess.js could not parse it. Check spacing and notation.' };
+  }
+  const side = board.turn();
+
+  // Build moves list (first move + main line). De-duplicate if user typed first move
+  // both in the dedicated field and at the beginning of mainLine.
+  const moves = [];
+  if (firstMove && firstMove.trim()) {
+    moves.push(firstMove.trim());
+  }
+  if (mainLine && mainLine.trim()) {
+    const tokens = mainLine.trim().split(/\s+/);
+    const cleanedTokens = [];
+    for (const t of tokens) {
+      if (/^\d+\.+$/.test(t)) continue;
+      if (/^(1-0|0-1|1\/2-1\/2)$/.test(t)) continue;
+      let clean = t.replace(/^\d+\.+/, '');
+      clean = clean.replace(/[!?]+$/, '');
+      if (clean) cleanedTokens.push(clean);
+    }
+    // If first cleaned mainLine token equals the first move (case-insensitive, after stripping),
+    // skip it to avoid duplication.
+    const sameMove = (a, b) => (a || '').replace(/[+#]/g, '').toLowerCase() ===
+                                (b || '').replace(/[+#]/g, '').toLowerCase();
+    let start = 0;
+    if (firstMove && cleanedTokens.length > 0 && sameMove(cleanedTokens[0], firstMove.trim())) {
+      start = 1;
+    }
+    for (let i = start; i < cleanedTokens.length; i++) {
+      moves.push(cleanedTokens[i]);
+    }
+  }
+
+  // Replay all moves to verify legality
+  const verifyBoard = new Chess(fen);
+  const verified = [];
+  for (const mv of moves) {
+    const m = verifyBoard.move(mv, { sloppy: true });
+    if (!m) {
+      return { error: `Move "${mv}" is not legal in this position. (Verified moves so far: ${verified.join(' ')})` };
+    }
+    verified.push(m.san);
+  }
+
+  // Build puzzle object
+  const id = nextCustomPuzzleId();
+  return {
+    puzzle: {
+      i: id,
+      m: kind === 'mate' ? (mateIn || 0) : 0,
+      k: kind,
+      f: fen,
+      s: side,
+      fm: verified[0] || null,
+      ml: verified,
+      sim: [],
+      label: (label || '').trim(),
+      source: (source || '').trim(),
+      dateAdded: new Date().toISOString(),
+    }
+  };
+}
+
+// ============================================================
+// Position editor: a clickable 8×8 board for setting up positions
+// ============================================================
+
+// Editor state (lives only while the add-puzzle modal is open)
+const editor = {
+  // 64 squares, indexed 0..63 with square 0 = a8 (top-left), 7 = h8, 56 = a1, 63 = h1
+  squares: new Array(64).fill(null),  // each cell: null or piece char like 'K' (white king) or 'p' (black pawn)
+  selectedPiece: 'K',                 // currently active piece for click-to-paint
+  sideToMove: 'w',
+};
+
+const PIECE_GLYPHS = {
+  K: '♔', Q: '♕', R: '♖', B: '♗', N: '♘', P: '♙',
+  k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟',
+};
+
+function squareIndexFromAlgebraic(sq) {
+  // 'a8' -> 0, 'h8' -> 7, 'a1' -> 56, 'h1' -> 63
+  const file = sq.charCodeAt(0) - 97; // 0..7
+  const rank = parseInt(sq[1], 10);   // 1..8
+  return (8 - rank) * 8 + file;
+}
+function algebraicFromSquareIndex(i) {
+  const file = String.fromCharCode(97 + (i % 8));
+  const rank = 8 - Math.floor(i / 8);
+  return file + rank;
+}
+
+function fenToEditorSquares(fen) {
+  // Parse first FEN field into 64-square array
+  const out = new Array(64).fill(null);
+  if (!fen) return out;
+  const pos = fen.split(/\s+/)[0] || '';
+  const ranks = pos.split('/');
+  if (ranks.length !== 8) return out;
+  for (let r = 0; r < 8; r++) {
+    let file = 0;
+    for (const c of ranks[r]) {
+      if (/\d/.test(c)) {
+        file += parseInt(c, 10);
+      } else {
+        out[r * 8 + file] = c;
+        file++;
+      }
+    }
+  }
+  return out;
+}
+
+function editorSquaresToFenPosition(squares) {
+  let pos = '';
+  for (let r = 0; r < 8; r++) {
+    let blanks = 0;
+    let row = '';
+    for (let f = 0; f < 8; f++) {
+      const c = squares[r * 8 + f];
+      if (c === null || c === undefined) {
+        blanks++;
+      } else {
+        if (blanks > 0) { row += blanks; blanks = 0; }
+        row += c;
+      }
+    }
+    if (blanks > 0) row += blanks;
+    pos += row + (r < 7 ? '/' : '');
+  }
+  return pos;
+}
+
+function buildFenFromEditor() {
+  const pos = editorSquaresToFenPosition(editor.squares);
+  // Infer castling rights from king/rook starting positions
+  let castling = '';
+  if (editor.squares[60] === 'K' && editor.squares[63] === 'R') castling += 'K';
+  if (editor.squares[60] === 'K' && editor.squares[56] === 'R') castling += 'Q';
+  if (editor.squares[4]  === 'k' && editor.squares[7]  === 'r') castling += 'k';
+  if (editor.squares[4]  === 'k' && editor.squares[0]  === 'r') castling += 'q';
+  if (!castling) castling = '-';
+  return `${pos} ${editor.sideToMove} ${castling} - 0 1`;
+}
+
+function renderEditorBoard(containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  let html = '<div class="ed-board">';
+  for (let i = 0; i < 64; i++) {
+    const r = Math.floor(i / 8);
+    const f = i % 8;
+    const isLight = (r + f) % 2 === 0;
+    const piece = editor.squares[i];
+    const glyph = piece ? PIECE_GLYPHS[piece] : '';
+    const colorClass = piece ? (piece === piece.toUpperCase() ? 'ed-w' : 'ed-b') : '';
+    html += `<div class="ed-sq ${isLight ? 'ed-light' : 'ed-dark'} ${colorClass}" data-sq="${i}">${glyph}</div>`;
+  }
+  html += '</div>';
+  // Coordinate labels
+  html += '<div class="ed-files">' + 'abcdefgh'.split('').map(c => `<span>${c}</span>`).join('') + '</div>';
+  container.innerHTML = html;
+
+  // Click handler
+  container.querySelectorAll('.ed-sq').forEach(el => {
+    el.addEventListener('click', (e) => {
+      const i = parseInt(el.dataset.sq, 10);
+      // If the active piece is null, clicking an occupied square clears it
+      if (editor.selectedPiece === null) {
+        editor.squares[i] = null;
+      } else if (editor.squares[i] === editor.selectedPiece) {
+        // Clicking the same piece clears the square
+        editor.squares[i] = null;
+      } else {
+        editor.squares[i] = editor.selectedPiece;
+      }
+      renderEditorBoard(containerId);
+      onEditorChanged();
+    });
+  });
+}
+
+function onEditorChanged() {
+  // Validate the position and show feedback
+  const fen = buildFenFromEditor();
+  const fenInput = document.getElementById('ap-fen');
+  if (fenInput) fenInput.value = fen;
+  const status = document.getElementById('ed-status');
+  if (status) {
+    try {
+      new Chess(fen);
+      // Quick sanity checks
+      const wK = editor.squares.filter(c => c === 'K').length;
+      const bK = editor.squares.filter(c => c === 'k').length;
+      if (wK !== 1 || bK !== 1) {
+        status.textContent = `⚠ Position needs exactly one of each king (currently ${wK} white, ${bK} black).`;
+        status.className = 'ed-status warn';
+      } else {
+        status.textContent = '✓ Position looks valid. FEN: ' + fen;
+        status.className = 'ed-status ok';
+      }
+    } catch (e) {
+      status.textContent = '✗ Invalid position: ' + e.message;
+      status.className = 'ed-status err';
+    }
+  }
+}
+
+function clearEditor() {
+  editor.squares = new Array(64).fill(null);
+  editor.sideToMove = 'w';
+  renderEditorBoard('ed-board-mount');
+  onEditorChanged();
+}
+
+function setEditorToStartingPosition() {
+  editor.squares = fenToEditorSquares('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR');
+  editor.sideToMove = 'w';
+  renderEditorBoard('ed-board-mount');
+  onEditorChanged();
+}
+
+// ============================================================
+// Image-to-position recognizer (best-effort for screenshots)
+// ============================================================
+//
+// Strategy: detect the largest square region in the image (assumed to be the
+// board), divide into 8×8 cells, and for each cell compare its central
+// pixel-mass profile against rough piece signatures.
+//
+// This is intentionally simple. It works decently for clean screenshots
+// (Lichess default theme, chess.com green/white). For photos of physical
+// boards, accuracy will be poor — that's why the editor opens for fix-up.
+
+function recognizeBoardFromImage(imgEl) {
+  // Returns { squares: [...64], confidence: 0..1 }, or null on failure.
+  // Simple approach: assume the entire image IS the board (user crops first).
+  // This is the most reliable thing we can promise without ML.
+  const canvas = document.createElement('canvas');
+  const size = 512; // standardized work size
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(imgEl, 0, 0, size, size);
+  const cellSize = size / 8;
+
+  const squares = new Array(64).fill(null);
+
+  // For each square, sample center pixels and compare brightness vs the square's
+  // expected light/dark color. A piece is "present" if the center deviates significantly
+  // from the empty-square baseline.
+  // Then, classify piece COLOR by looking at the dominant tone of the piece pixels
+  // (white pieces are brighter than the square they sit on; black pieces darker).
+  // Piece TYPE classification is too hard without ML — we leave that as null
+  // and let the user place pieces in the editor.
+  //
+  // Actually simpler and more honest: just detect WHICH SQUARES HAVE PIECES,
+  // and what color the piece is. Mark them in the editor so user only has to
+  // identify the piece type, not also where pieces are. Saves time.
+
+  // Compute baseline light/dark cell colors (average of squares we're confident are empty —
+  // hard to know which are empty in advance, so use median across all squares as proxy)
+  const cellAvg = [];
+  for (let r = 0; r < 8; r++) {
+    for (let f = 0; f < 8; f++) {
+      const x0 = Math.floor(f * cellSize + cellSize * 0.1);
+      const y0 = Math.floor(r * cellSize + cellSize * 0.1);
+      const w = Math.floor(cellSize * 0.8);
+      const h = Math.floor(cellSize * 0.8);
+      const data = ctx.getImageData(x0, y0, w, h).data;
+      let sumR = 0, sumG = 0, sumB = 0, n = 0;
+      for (let p = 0; p < data.length; p += 4) {
+        sumR += data[p]; sumG += data[p+1]; sumB += data[p+2];
+        n++;
+      }
+      const isLight = (r + f) % 2 === 0;
+      cellAvg.push({
+        r: sumR / n, g: sumG / n, b: sumB / n,
+        brightness: (sumR + sumG + sumB) / (3 * n),
+        isLight,
+        idx: r * 8 + f,
+      });
+    }
+  }
+
+  // Estimate empty light/dark colors using medians of brightnesses by square color
+  const lightBrights = cellAvg.filter(c => c.isLight).map(c => c.brightness).sort((a,b)=>a-b);
+  const darkBrights  = cellAvg.filter(c => !c.isLight).map(c => c.brightness).sort((a,b)=>a-b);
+  const median = arr => arr[Math.floor(arr.length / 2)];
+  const lightBaseline = median(lightBrights);
+  const darkBaseline = median(darkBrights);
+
+  // For each square, deviation from baseline = piece signal
+  for (const c of cellAvg) {
+    const baseline = c.isLight ? lightBaseline : darkBaseline;
+    const dev = c.brightness - baseline;
+    // Threshold: |dev| > 25 indicates piece present (tunable)
+    if (Math.abs(dev) < 25) {
+      squares[c.idx] = null;  // empty
+    } else {
+      // Color: brighter than baseline → white piece; darker → black piece
+      // We use 'P' / 'p' as placeholder pieces (user picks the actual type in editor)
+      squares[c.idx] = dev > 0 ? '?W' : '?B';  // unknown white / unknown black
+    }
+  }
+
+  // Count detected pieces — if absurdly low or high, the recognizer probably failed
+  const pieceCount = squares.filter(s => s !== null).length;
+  const confidence = (pieceCount >= 3 && pieceCount <= 32) ? 0.6 : 0.1;
+
+  return { squares, confidence, pieceCount };
+}
+
+// Unknown markers from the recognizer get rendered as faded silhouettes the user clicks to refine
+const UNKNOWN_GLYPH = { '?W': '○', '?B': '●' };
+
+function renderEditorBoardWithUnknowns(containerId) {
+  // Same as renderEditorBoard but renders unknown markers distinctly
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  let html = '<div class="ed-board">';
+  for (let i = 0; i < 64; i++) {
+    const r = Math.floor(i / 8);
+    const f = i % 8;
+    const isLight = (r + f) % 2 === 0;
+    const cell = editor.squares[i];
+    let glyph = '', colorClass = '', extraClass = '';
+    if (cell === '?W') { glyph = '○'; extraClass = 'ed-unknown ed-w'; }
+    else if (cell === '?B') { glyph = '●'; extraClass = 'ed-unknown ed-b'; }
+    else if (cell) {
+      glyph = PIECE_GLYPHS[cell] || '';
+      colorClass = cell === cell.toUpperCase() ? 'ed-w' : 'ed-b';
+    }
+    html += `<div class="ed-sq ${isLight ? 'ed-light' : 'ed-dark'} ${colorClass} ${extraClass}" data-sq="${i}">${glyph}</div>`;
+  }
+  html += '</div>';
+  html += '<div class="ed-files">' + 'abcdefgh'.split('').map(c => `<span>${c}</span>`).join('') + '</div>';
+  container.innerHTML = html;
+  container.querySelectorAll('.ed-sq').forEach(el => {
+    el.addEventListener('click', (e) => {
+      const i = parseInt(el.dataset.sq, 10);
+      if (editor.selectedPiece === null) {
+        editor.squares[i] = null;
+      } else if (editor.squares[i] === editor.selectedPiece) {
+        editor.squares[i] = null;
+      } else {
+        editor.squares[i] = editor.selectedPiece;
+      }
+      renderEditorBoardWithUnknowns(containerId);
+      onEditorChanged();
+    });
+  });
+}
+
+function openAddPuzzleModal(existingPuzzle) {
+  // existingPuzzle: optional, when editing an existing custom puzzle
+  const isEdit = !!existingPuzzle;
+  const initial = existingPuzzle || { f: '', fm: '', ml: [], k: 'mate', m: 1, label: '', source: '' };
+  const initialMainLine = (initial.ml || []).slice(initial.fm ? 1 : 0).join(' ');
+
+  // Pre-fill editor from existing puzzle's FEN, if editing
+  editor.squares = fenToEditorSquares(initial.f);
+  editor.sideToMove = (initial.s) || (initial.f ? (initial.f.split(' ')[1] || 'w') : 'w');
+  editor.selectedPiece = 'K';
+
+  openModal(isEdit ? 'Edit puzzle' : 'Add a new puzzle',
+    `<div class="ap-tabs">
+      <button class="ap-tab ap-tab-active" data-tab="image">📷 From image</button>
+      <button class="ap-tab" data-tab="editor">✏️ Board editor</button>
+      <button class="ap-tab" data-tab="fen">⌨ From FEN</button>
+    </div>
+
+    <!-- TAB 1: From image -->
+    <div class="ap-pane ap-pane-active" data-pane="image">
+      <p style="color:var(--ink-soft);font-style:italic;font-size:14px;margin:0 0 12px;">
+        Upload a screenshot or photo of the board. <strong>Crop tightly to just the 8×8 board</strong> for best results.
+        The recognizer will detect occupied squares; you'll fill in the piece types in the editor.
+      </p>
+      <div class="ap-img-drop" id="ap-img-drop">
+        <input type="file" id="ap-img-file" accept="image/*" style="display:none;">
+        <div id="ap-img-prompt">
+          <div style="font-size:32px;margin-bottom:6px;">📷</div>
+          <div>Click to choose an image, or drag-and-drop here</div>
+          <div style="font-size:12px;color:var(--ink-faded);margin-top:6px;">
+            Supports PNG, JPG, screenshots, and phone photos
+          </div>
+        </div>
+        <img id="ap-img-preview" style="display:none;max-width:100%;max-height:280px;">
+      </div>
+      <div id="ap-img-status" class="ed-status" style="display:none;"></div>
+      <div class="modal-actions" style="border-top:none;padding-top:8px;margin-top:8px;">
+        <button class="subtle" id="ap-img-clear">Clear image</button>
+        <button class="primary" id="ap-img-recognize">Recognize → editor</button>
+      </div>
+    </div>
+
+    <!-- TAB 2: Board editor -->
+    <div class="ap-pane" data-pane="editor">
+      <p style="color:var(--ink-soft);font-style:italic;font-size:14px;margin:0 0 8px;">
+        Click a piece below, then click squares to place. Click an occupied square with the same piece to remove it.
+      </p>
+      <div class="ed-piece-tray">
+        <button class="ed-pbtn" data-pc="K" title="White King">♔</button>
+        <button class="ed-pbtn" data-pc="Q" title="White Queen">♕</button>
+        <button class="ed-pbtn" data-pc="R" title="White Rook">♖</button>
+        <button class="ed-pbtn" data-pc="B" title="White Bishop">♗</button>
+        <button class="ed-pbtn" data-pc="N" title="White Knight">♘</button>
+        <button class="ed-pbtn" data-pc="P" title="White Pawn">♙</button>
+        <span class="ed-tray-sep"></span>
+        <button class="ed-pbtn ed-pbtn-b" data-pc="k" title="Black King">♚</button>
+        <button class="ed-pbtn ed-pbtn-b" data-pc="q" title="Black Queen">♛</button>
+        <button class="ed-pbtn ed-pbtn-b" data-pc="r" title="Black Rook">♜</button>
+        <button class="ed-pbtn ed-pbtn-b" data-pc="b" title="Black Bishop">♝</button>
+        <button class="ed-pbtn ed-pbtn-b" data-pc="n" title="Black Knight">♞</button>
+        <button class="ed-pbtn ed-pbtn-b" data-pc="p" title="Black Pawn">♟</button>
+        <span class="ed-tray-sep"></span>
+        <button class="ed-pbtn ed-pbtn-erase" data-pc="" title="Erase">✕</button>
+      </div>
+      <div id="ed-board-mount"></div>
+      <div class="ed-toolbar">
+        <button class="subtle small" id="ed-clear">Clear board</button>
+        <button class="subtle small" id="ed-start">Starting position</button>
+        <span class="ed-side-toggle">
+          <label>Side to move:</label>
+          <button class="ed-sbtn" data-side="w" id="ed-side-w">White</button>
+          <button class="ed-sbtn" data-side="b" id="ed-side-b">Black</button>
+        </span>
+      </div>
+      <div id="ed-status" class="ed-status">Set up the position…</div>
+    </div>
+
+    <!-- TAB 3: From FEN -->
+    <div class="ap-pane" data-pane="fen">
+      <p style="color:var(--ink-soft);font-style:italic;font-size:14px;margin:0 0 12px;">
+        Paste a FEN directly. Common in Lichess study URLs and PGN viewers.
+      </p>
+      <div class="modal-row" style="flex-direction:column;align-items:stretch;">
+        <label for="ap-fen" style="margin-bottom:4px;">FEN</label>
+        <input type="text" id="ap-fen" placeholder="e.g. r1bqk2r/ppp2ppp/2np1n2/4p3/1bB1P3/2NP1N2/PPP2PPP/R1BQK2R w KQkq - 0 1" value="${(initial.f || '').replace(/"/g, '&quot;')}">
+      </div>
+      <button class="subtle small" id="ap-fen-to-editor" style="margin-top:8px;">Load this FEN into the board editor</button>
+    </div>
+
+    <!-- Always-visible bottom: solution and metadata -->
+    <div class="modal-section" style="margin-top:18px;border-top:1px solid var(--rule);padding-top:14px;">
+      <h3>Solution &amp; metadata</h3>
+      <div class="modal-row" style="flex-direction:column;align-items:stretch;">
+        <label for="ap-firstmove" style="margin-bottom:4px;">First move (SAN, optional)</label>
+        <input type="text" id="ap-firstmove" placeholder="e.g. Bxf7+" value="${(initial.fm || '').replace(/"/g, '&quot;')}">
+      </div>
+      <div class="modal-row" style="flex-direction:column;align-items:stretch;">
+        <label for="ap-mainline" style="margin-bottom:4px;">Full solution (optional, space-separated)</label>
+        <input type="text" id="ap-mainline" placeholder="e.g. Kxf7 Ng5+ Ke8 Nxe6" value="${initialMainLine.replace(/"/g, '&quot;')}">
+      </div>
+      <div class="modal-row">
+        <label for="ap-kind">Type</label>
+        <select id="ap-kind" style="font-family:'Cardo',serif;font-size:16px;background:var(--paper-warm);border:1px solid var(--paper-edge);padding:6px 10px;">
+          <option value="mate">Mate in N</option>
+          <option value="win">Find the winning move</option>
+          <option value="draw">Find the drawing move</option>
+        </select>
+      </div>
+      <div class="modal-row" id="ap-mate-in-row">
+        <label for="ap-matein">Mate in how many moves?</label>
+        <input type="number" id="ap-matein" min="1" max="10" value="${initial.m || 1}">
+      </div>
+      <div class="modal-row" style="flex-direction:column;align-items:stretch;">
+        <label for="ap-label" style="margin-bottom:4px;">Label (optional)</label>
+        <input type="text" id="ap-label" maxlength="60" placeholder="e.g. Lichess #abc123" value="${(initial.label || '').replace(/"/g, '&quot;')}">
+      </div>
+      <div class="modal-row" style="flex-direction:column;align-items:stretch;">
+        <label for="ap-source" style="margin-bottom:4px;">Source URL (optional)</label>
+        <input type="text" id="ap-source" maxlength="200" placeholder="e.g. https://lichess.org/training/abc123" value="${(initial.source || '').replace(/"/g, '&quot;')}">
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="subtle" id="ap-cancel">Cancel</button>
+      <button class="primary" id="ap-save">${isEdit ? 'Save changes' : 'Add puzzle'}</button>
+    </div>`,
+    () => {
+      // ===== Tab switching =====
+      document.querySelectorAll('.ap-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+          document.querySelectorAll('.ap-tab').forEach(t => t.classList.remove('ap-tab-active'));
+          tab.classList.add('ap-tab-active');
+          document.querySelectorAll('.ap-pane').forEach(p => p.classList.remove('ap-pane-active'));
+          document.querySelector(`.ap-pane[data-pane="${tab.dataset.tab}"]`).classList.add('ap-pane-active');
+          // When switching to editor, render fresh
+          if (tab.dataset.tab === 'editor') {
+            renderEditorBoardWithUnknowns('ed-board-mount');
+            updateEdSideButtons();
+          }
+        });
+      });
+
+      // ===== Image tab =====
+      const imgDrop = $('#ap-img-drop');
+      const imgFile = $('#ap-img-file');
+      const imgPreview = $('#ap-img-preview');
+      const imgPrompt = $('#ap-img-prompt');
+      const imgStatus = $('#ap-img-status');
+      let loadedImage = null;
+
+      const loadImageFile = (file) => {
+        if (!file || !file.type.startsWith('image/')) {
+          alert('Please choose an image file.');
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          imgPreview.src = ev.target.result;
+          imgPreview.style.display = 'block';
+          imgPrompt.style.display = 'none';
+          imgPreview.onload = () => { loadedImage = imgPreview; };
+        };
+        reader.readAsDataURL(file);
+      };
+
+      imgDrop.addEventListener('click', () => imgFile.click());
+      imgFile.addEventListener('change', (e) => {
+        if (e.target.files[0]) loadImageFile(e.target.files[0]);
+      });
+      imgDrop.addEventListener('dragover', (e) => { e.preventDefault(); imgDrop.classList.add('drag-over'); });
+      imgDrop.addEventListener('dragleave', () => imgDrop.classList.remove('drag-over'));
+      imgDrop.addEventListener('drop', (e) => {
+        e.preventDefault();
+        imgDrop.classList.remove('drag-over');
+        if (e.dataTransfer.files[0]) loadImageFile(e.dataTransfer.files[0]);
+      });
+      // Paste image from clipboard
+      document.addEventListener('paste', function pasteHandler(e) {
+        if ($('#modal-backdrop').style.display === 'none') {
+          document.removeEventListener('paste', pasteHandler);
+          return;
+        }
+        for (const item of e.clipboardData.items) {
+          if (item.type.startsWith('image/')) {
+            loadImageFile(item.getAsFile());
+            e.preventDefault();
+            break;
+          }
+        }
+      });
+
+      $('#ap-img-clear').addEventListener('click', () => {
+        loadedImage = null;
+        imgPreview.style.display = 'none';
+        imgPrompt.style.display = '';
+        imgFile.value = '';
+        imgStatus.style.display = 'none';
+      });
+
+      $('#ap-img-recognize').addEventListener('click', () => {
+        if (!loadedImage) {
+          alert('Please load an image first.');
+          return;
+        }
+        const result = recognizeBoardFromImage(loadedImage);
+        if (!result || result.confidence < 0.2) {
+          imgStatus.textContent = '⚠ Recognizer had trouble with this image. Switching to the empty editor — you can place the pieces manually.';
+          imgStatus.className = 'ed-status warn';
+          imgStatus.style.display = '';
+          editor.squares = new Array(64).fill(null);
+        } else {
+          imgStatus.textContent = `✓ Detected ${result.pieceCount} piece${result.pieceCount === 1 ? '' : 's'}. Now click each one in the editor to set its type.`;
+          imgStatus.className = 'ed-status ok';
+          imgStatus.style.display = '';
+          editor.squares = result.squares.slice();
+        }
+        // Switch to editor tab
+        document.querySelector('.ap-tab[data-tab="editor"]').click();
+      });
+
+      // ===== Editor tab =====
+      const updateEdSideButtons = () => {
+        $('#ed-side-w').classList.toggle('ed-sbtn-active', editor.sideToMove === 'w');
+        $('#ed-side-b').classList.toggle('ed-sbtn-active', editor.sideToMove === 'b');
+      };
+      const updatePieceTrayActive = () => {
+        document.querySelectorAll('.ed-pbtn').forEach(b => b.classList.remove('ed-pbtn-active'));
+        const active = document.querySelector(`.ed-pbtn[data-pc="${editor.selectedPiece || ''}"]`);
+        if (active) active.classList.add('ed-pbtn-active');
+      };
+      document.querySelectorAll('.ed-pbtn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const pc = btn.dataset.pc;
+          editor.selectedPiece = pc || null;
+          updatePieceTrayActive();
+        });
+      });
+      updatePieceTrayActive();
+
+      $('#ed-clear').addEventListener('click', () => clearEditor());
+      $('#ed-start').addEventListener('click', () => setEditorToStartingPosition());
+      $('#ed-side-w').addEventListener('click', () => {
+        editor.sideToMove = 'w';
+        updateEdSideButtons();
+        onEditorChanged();
+      });
+      $('#ed-side-b').addEventListener('click', () => {
+        editor.sideToMove = 'b';
+        updateEdSideButtons();
+        onEditorChanged();
+      });
+
+      // Initial render
+      renderEditorBoardWithUnknowns('ed-board-mount');
+      updateEdSideButtons();
+      onEditorChanged();
+
+      // ===== FEN tab =====
+      $('#ap-fen-to-editor').addEventListener('click', () => {
+        const fen = $('#ap-fen').value.trim();
+        if (!fen) { alert('Enter a FEN first.'); return; }
+        try {
+          new Chess(fen);
+        } catch (e) {
+          alert('Invalid FEN: ' + e.message);
+          return;
+        }
+        editor.squares = fenToEditorSquares(fen);
+        editor.sideToMove = fen.split(/\s+/)[1] || 'w';
+        document.querySelector('.ap-tab[data-tab="editor"]').click();
+      });
+
+      // ===== Bottom shared section =====
+      const kindSel = $('#ap-kind');
+      kindSel.value = initial.k || 'mate';
+      const updateMateInVisibility = () => {
+        $('#ap-mate-in-row').style.display = (kindSel.value === 'mate') ? '' : 'none';
+      };
+      updateMateInVisibility();
+      kindSel.addEventListener('change', updateMateInVisibility);
+
+      $('#ap-cancel').addEventListener('click', closeModal);
+      $('#ap-save').addEventListener('click', () => {
+        // Determine FEN: editor is the source of truth (the FEN textbox is just for display)
+        // If the editor has any pieces, use it. Otherwise check the FEN textbox.
+        let fen = '';
+        const hasEditor = editor.squares.some(c => c !== null);
+        if (hasEditor) {
+          fen = buildFenFromEditor();
+        } else {
+          fen = $('#ap-fen').value.trim();
+        }
+        const firstMove = $('#ap-firstmove').value.trim();
+        const mainLine = $('#ap-mainline').value.trim();
+        const kind = kindSel.value;
+        const mateIn = parseInt($('#ap-matein').value, 10) || 1;
+        const label = $('#ap-label').value.trim();
+        const source = $('#ap-source').value.trim();
+
+        if (!fen) { alert('Please set up a position (image, editor, or FEN).'); return; }
+        if (kind === 'mate' && (mateIn < 1 || mateIn > 10)) {
+          alert('Please enter a valid mate-in number (1-10).');
+          return;
+        }
+        // Reject any unknown placeholder pieces
+        if (editor.squares.some(c => c === '?W' || c === '?B')) {
+          alert('Some squares still have placeholder pieces (○ or ●). Click each one and pick the actual piece type.');
+          return;
+        }
+
+        const result = validateAndBuildCustomPuzzle({
+          fen, firstMove, mainLine, kind, mateIn, label, source,
+        });
+        if (result.error) {
+          alert(result.error);
+          return;
+        }
+        const puz = result.puzzle;
+
+        if (isEdit) {
+          puz.i = existingPuzzle.i;
+          puz.dateAdded = existingPuzzle.dateAdded;
+          const idx = state.profile.myPuzzles.findIndex(p => p.i === existingPuzzle.i);
+          if (idx >= 0) state.profile.myPuzzles[idx] = puz;
+        } else {
+          state.profile.myPuzzles.push(puz);
+        }
+        saveProgress();
+        syncMyPuzzlesIntoIndex();
+        closeModal();
+        state.filter = 'mypuzzles';
+        $('#sel-section').value = 'mypuzzles';
+        updateMyPuzzlesBarVisibility();
+        loadPuzzle(puz.i);
+      });
+    }
+  );
+}
+
+function deleteCurrentCustomPuzzle() {
+  if (!state.current || state.current.i < 100000) {
+    alert('This is a built-in puzzle and cannot be deleted.');
+    return;
+  }
+  if (!confirm(`Delete this saved puzzle${state.current.label ? ` ("${state.current.label}")` : ''}?`)) return;
+  const id = state.current.i;
+  state.profile.myPuzzles = state.profile.myPuzzles.filter(p => p.i !== id);
+  // Also remove from solved/missed
+  state.solved.delete(id);
+  state.missed.delete(id);
+  saveProgress();
+  syncMyPuzzlesIntoIndex();
+  // Move to next or fall back to mate-in-1
+  const remaining = state.profile.myPuzzles;
+  if (remaining.length > 0) {
+    loadPuzzle(remaining[0].i);
+  } else {
+    state.filter = '1';
+    $('#sel-section').value = '1';
+    updateMyPuzzlesBarVisibility();
+    randomPuzzle();
+  }
+}
+
+function updateMyPuzzlesBarVisibility() {
+  const bar = $('#my-puzzles-bar');
+  if (!bar) return;
+  bar.style.display = (state.filter === 'mypuzzles') ? 'flex' : 'none';
+  // Edit/Delete buttons are only useful when viewing a custom puzzle
+  const onCustom = state.current && state.current.i >= 100000;
+  $('#btn-edit-puzzle').disabled = !onCustom;
+  $('#btn-delete-puzzle').disabled = !onCustom;
+}
+
+// ============================================================
+// Stockfish: load via Blob to bypass cross-origin Worker limits
+//
+// This is the technique from the previous chess coach app:
+// fetch() the Stockfish JS as text, wrap in a Blob, create a Worker
+// from the blob URL. Same-origin from the browser's POV.
+// ============================================================
+async function initEngine() {
+  setEngineStatus('loading');
+  try {
+    const resp = await fetch('https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js');
+    if (!resp.ok) throw new Error('Stockfish fetch failed: ' + resp.status);
+    const text = await resp.text();
+    const blob = new Blob([text], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    state.sf = new Worker(url);
+    state.sf.onerror = (e) => {
+      console.warn('Stockfish error:', e);
+      setEngineStatus('failed');
+    };
+
+    // Wait for uciok
+    await new Promise((res, rej) => {
+      const t = setTimeout(() => rej(new Error('Engine init timeout')), 8000);
+      const onMsg = (e) => {
+        if (e.data === 'uciok') {
+          clearTimeout(t);
+          state.sf.removeEventListener('message', onMsg);
+          res();
+        }
+      };
+      state.sf.addEventListener('message', onMsg);
+      state.sf.postMessage('uci');
+    });
+
+    state.sf.postMessage('setoption name Hash value 32');
+    state.sf.postMessage('setoption name Threads value 1');
+    state.sfReady = true;
+    setEngineStatus('ready');
+    processQueue();
+  } catch (e) {
+    console.warn('Stockfish unavailable, using JS fallback:', e);
+    setEngineStatus('failed');
+  }
+}
+
+function setEngineStatus(s) {
+  const dot = $('#engine-dot');
+  const label = $('#engine-status');
+  dot.classList.remove('ready', 'thinking');
+  if (s === 'loading')      label.textContent = 'Loading engine…';
+  else if (s === 'ready')   { dot.classList.add('ready'); label.textContent = 'Engine ready'; }
+  else if (s === 'thinking'){ dot.classList.add('thinking'); label.textContent = 'Engine thinking…'; }
+  else if (s === 'failed')  label.textContent = 'JS fallback';
+}
+
+// Analyze a position. Returns { mateIn, bestmove } where mateIn is signed
+// from side-to-move's perspective: positive = side-to-move can mate in N,
+// negative = side-to-move is being mated in N.
+function engineAnalyze(fen, options) {
+  return new Promise((resolve) => {
+    const job = { fen, options, resolve };
+    state.sfQueue.push(job);
+    processQueue();
+  });
+}
+
+function processQueue() {
+  if (!state.sfReady || state.sfBusy || state.sfQueue.length === 0) return;
+  const job = state.sfQueue.shift();
+  state.sfBusy = true;
+  setEngineStatus('thinking');
+
+  let info = { mateIn: null, cp: null };
+  let bestmove = null;
+  const opts = job.options || {};
+  const moveTime = opts.movetime || 300;
+  let resolved = false;
+
+  const finish = (result) => {
+    if (resolved) return;
+    resolved = true;
+    clearTimeout(safety);
+    state.sf.removeEventListener('message', handler);
+    state.sfBusy = false;
+    setEngineStatus(state.sfReady ? 'ready' : 'failed');
+    job.resolve(result);
+    processQueue();
+  };
+
+  const handler = (e) => {
+    const line = e.data;
+    if (typeof line !== 'string') return;
+    if (line.startsWith('info ') && line.includes(' pv ')) {
+      const m = line.match(/score (cp|mate) (-?\d+)/);
+      if (m) {
+        if (m[1] === 'mate') { info.mateIn = parseInt(m[2], 10); info.cp = null; }
+        else { info.cp = parseInt(m[2], 10); }
+      }
+    } else if (line.startsWith('bestmove')) {
+      bestmove = line.split(' ')[1];
+      finish({ mateIn: info.mateIn, cp: info.cp, bestmove });
+    }
+  };
+
+  // Hard safety timeout: never let an engine call hang the UI
+  const safety = setTimeout(() => {
+    finish({ mateIn: info.mateIn, cp: info.cp, bestmove: null, timeout: true });
+  }, moveTime + 2500);
+
+  state.sf.addEventListener('message', handler);
+  state.sf.postMessage('ucinewgame');
+  state.sf.postMessage('position fen ' + job.fen);
+  state.sf.postMessage('go movetime ' + moveTime);
+}
+
+// ============================================================
+// Pure-JS forced-mate solver — fallback if engine fails to load
+// ============================================================
+function jsCanForceMate(game, pliesLeft, attackerColor) {
+  if (game.in_checkmate()) return game.turn() !== attackerColor;
+  if (pliesLeft <= 0) return false;
+  const isAttacker = (game.turn() === attackerColor);
+  const moves = game.moves({ verbose: true });
+  if (moves.length === 0) return false;
+
+  if (isAttacker) {
+    // Order: checks first, then captures
+    moves.sort((a, b) => {
+      const aCk = a.san.indexOf('+') >= 0 || a.san.indexOf('#') >= 0;
+      const bCk = b.san.indexOf('+') >= 0 || b.san.indexOf('#') >= 0;
+      if (aCk !== bCk) return aCk ? -1 : 1;
+      const aCap = a.flags.indexOf('c') >= 0;
+      const bCap = b.flags.indexOf('c') >= 0;
+      return (bCap ? 1 : 0) - (aCap ? 1 : 0);
+    });
+    for (const m of moves) {
+      game.move(m);
+      const ok = jsCanForceMate(game, pliesLeft - 1, attackerColor);
+      game.undo();
+      if (ok) return true;
+    }
+    return false;
+  } else {
+    for (const m of moves) {
+      game.move(m);
+      const ok = jsCanForceMate(game, pliesLeft - 1, attackerColor);
+      game.undo();
+      if (!ok) return false;
+    }
+    return true;
+  }
+}
+
+// JS-side best defender move (fallback)
+function jsFindBestDefense(game, attackerColor, maxPlies) {
+  const moves = game.moves({ verbose: true });
+  if (!moves.length) return null;
+  let bestMove = null;
+  let bestSurvival = -1;
+  for (const m of moves) {
+    game.move(m);
+    let survival = maxPlies + 1;
+    for (let p = 1; p <= maxPlies; p += 2) {
+      if (jsCanForceMate(game, p, attackerColor)) { survival = p; break; }
+    }
+    game.undo();
+    if (survival > bestSurvival) { bestSurvival = survival; bestMove = m; }
+  }
+  return bestMove;
+}
+
+// ============================================================
+// Board / move handling
+// ============================================================
+function setupBoard(fen, orientation) {
+  if (state.board) {
+    try { state.board.destroy(); } catch (e) {}
+  }
+  state.board = Chessboard('board', {
+    position: fen.split(' ')[0],
+    orientation: orientation,
+    draggable: true,
+    pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png',
+    onDragStart: handleDragStart,
+    onDrop: handleDrop,
+    onSnapEnd: () => state.board.position(state.game.fen(), false),
+  });
+  // Attach click handlers for click-to-move
+  state.selectedSquare = null;
+  attachClickHandlers();
+}
+
+function attachClickHandlers() {
+  // Listen for clicks on every square. chessboard.js generates squares with
+  // class "square-XX" (e.g., "square-e4"). Use event delegation on the board.
+  const boardEl = document.getElementById('board');
+  if (!boardEl) return;
+  // Avoid double-binding
+  if (boardEl._clickBound) return;
+  boardEl._clickBound = true;
+  boardEl.addEventListener('click', onBoardClick);
+}
+
+function squareFromEvent(e) {
+  // Find the closest element that has a class matching square-XX
+  let el = e.target;
+  while (el && el !== document.body) {
+    if (el.classList) {
+      for (const cls of el.classList) {
+        const m = cls.match(/^square-([a-h][1-8])$/);
+        if (m) return m[1];
+      }
+    }
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function onBoardClick(e) {
+  if (state.ui !== 'ready') return;
+  if (state.game.game_over()) return;
+
+  const square = squareFromEvent(e);
+  if (!square) return;
+
+  // Determine who is "the mover" right now. For mate puzzles, the user plays both sides:
+  // their own (state.current.s) AND the opponent. Whoever's turn it is, we let them move.
+  const turnNow = state.game.turn();
+  const expectedSide = (state.playingOpponent ? (state.current.s === 'w' ? 'b' : 'w') : state.current.s);
+
+  // Block moves only when:
+  //  - For mate puzzles: the user has already played all their `mate_in` moves (and game's not yet over)
+  //  - For non-mate puzzles: never block on count
+  const userOwnMovesPlayed = state.history.filter(h => h.side === state.current.s).length;
+  if (state.current.k === 'mate' && userOwnMovesPlayed >= state.current.m && !state.playingOpponent) return;
+
+  // Block starting a new attempt when daily limit hit (mid-puzzle moves still allowed)
+  if (userOwnMovesPlayed === 0 && !state.playingOpponent && isDailyLimitHit()) {
+    showDailyLimitNotice();
+    return;
+  }
+
+  // Only let them move the side whose turn it is
+  if (turnNow !== expectedSide) return;
+
+  const piece = state.game.get(square);
+
+  if (state.selectedSquare === null) {
+    if (!piece || piece.color !== expectedSide) return;
+    selectSquare(square);
+  } else if (state.selectedSquare === square) {
+    deselectSquare();
+  } else if (piece && piece.color === expectedSide) {
+    deselectSquare();
+    selectSquare(square);
+  } else {
+    const candidates = state.game.moves({ square: state.selectedSquare, verbose: true });
+    const legal = candidates.find(m => m.to === square);
+    if (legal) {
+      applyUserMove({ from: state.selectedSquare, to: square, promotion: 'q' });
+    } else {
+      deselectSquare();
+    }
+  }
+}
+
+function selectSquare(sq) {
+  state.selectedSquare = sq;
+  // Highlight selected square
+  const el = document.querySelector('#board .square-' + sq);
+  if (el) el.classList.add('highlight-selected');
+  // Highlight legal target squares
+  const moves = state.game.moves({ square: sq, verbose: true });
+  state.legalTargets = new Set();
+  for (const m of moves) {
+    state.legalTargets.add(m.to);
+    const targetEl = document.querySelector('#board .square-' + m.to);
+    if (targetEl) {
+      const isCapture = m.flags.indexOf('c') >= 0 || m.flags.indexOf('e') >= 0;
+      targetEl.classList.add(isCapture ? 'highlight-target-capture' : 'highlight-target');
+    }
+  }
+}
+
+function deselectSquare() {
+  if (state.selectedSquare !== null) {
+    const el = document.querySelector('#board .square-' + state.selectedSquare);
+    if (el) el.classList.remove('highlight-selected');
+  }
+  // Clear all target highlights
+  document.querySelectorAll('#board .square-55d63').forEach(el => {
+    el.classList.remove('highlight-target', 'highlight-target-capture', 'highlight-selected');
+  });
+  state.selectedSquare = null;
+  state.legalTargets = null;
+}
+
+function applyUserMove(moveSpec) {
+  const move = state.game.move(moveSpec);
+  if (move === null) return false;
+  deselectSquare();
+  state.board.position(state.game.fen(), true);
+  // Track attempt: only the FIRST own-side move counts as the attempt being scored
+  const userOwnMovesPlayed = state.history.filter(h => h.side === state.current.s).length;
+  const isFirstOwnMove = (userOwnMovesPlayed === 0 && move.color === state.current.s);
+  if (isFirstOwnMove) {
+    state.attemptCount++;
+  }
+  state.history.push({ side: move.color, san: move.san });
+  renderScoresheet();
+  setTimeout(() => verifyMove(move), 80);
+  return true;
+}
+
+function handleDragStart(source, piece) {
+  if (state.ui !== 'ready') return false;
+  if (state.game.game_over()) return false;
+  const turn = state.game.turn();
+  if ((turn === 'w' && piece.startsWith('b')) ||
+      (turn === 'b' && piece.startsWith('w'))) return false;
+  const expectedSide = (state.playingOpponent ? (state.current.s === 'w' ? 'b' : 'w') : state.current.s);
+  if (turn !== expectedSide) return false;
+  const userOwnMovesPlayed = state.history.filter(h => h.side === state.current.s).length;
+  if (state.current.k === 'mate' && userOwnMovesPlayed >= state.current.m && !state.playingOpponent) return false;
+  // Block starting a NEW puzzle attempt when daily limit hit
+  if (userOwnMovesPlayed === 0 && !state.playingOpponent && isDailyLimitHit()) {
+    showDailyLimitNotice();
+    return false;
+  }
+  deselectSquare();
+  return true;
+}
+
+function handleDrop(source, target) {
+  const candidates = state.game.moves({ square: source, verbose: true });
+  const legal = candidates.find(m => m.to === target);
+  if (!legal) return 'snapback';
+  const move = state.game.move({ from: source, to: target, promotion: 'q' });
+  if (move === null) return 'snapback';
+  // Track attempt: only count first OWN move as attempt
+  const userOwnMovesPlayed = state.history.filter(h => h.side === state.current.s).length;
+  const isFirstOwnMove = (userOwnMovesPlayed === 0 && move.color === state.current.s);
+  if (isFirstOwnMove) {
+    state.attemptCount++;
+  }
+  state.history.push({ side: move.color, san: move.san });
+  renderScoresheet();
+  setTimeout(() => verifyMove(move), 80);
+}
+
+// ============================================================
+// Verification
+// ============================================================
+async function verifyMove(userMove) {
+  // Cheap check: did this move deliver mate?
+  if (state.game.in_checkmate()) {
+    if (userMove.color === state.current.s) {
+      onCorrectFinalMove(userMove);
+    } else {
+      // Opponent move shouldn't deliver mate against the user — but if it does, the user lost.
+      onOpponentMoveBlunder(userMove);
+    }
+    return;
+  }
+
+  // OPPONENT-SIDE move: user is playing the defender's move.
+  // We just need to confirm it's a "reasonable" defense — meaning attacker can still
+  // mate within the remaining budget. If user picks a defense that ALLOWS faster mate
+  // than the budget allows, that's still fine (attacker still wins). The only concern
+  // is that the defense must be LEGAL (already checked) and the position must still
+  // be mateable for attacker.
+  if (userMove.color !== state.current.s) {
+    // Mate puzzles only — non-mate puzzles use the strict book line
+    if (state.current.k !== 'mate') {
+      return verifyNonMateMove(userMove);
+    }
+    return verifyOpponentMove(userMove);
+  }
+
+  // Non-mate puzzles use book-line verification for own moves too
+  if (state.current.k !== 'mate') {
+    return verifyNonMateMove(userMove);
+  }
+
+  // Own-side mate puzzle move
+  if (state.current.m === 1) {
+    onWrongMove(userMove);
+    return;
+  }
+
+  setStatus('thinking', 'Checking…', 'Verifying that the move forces mate.');
+  state.ui = 'thinking';
+
+  const userMovesPlayed = state.history.filter(h => h.side === state.current.s).length;
+  const remainingFullMoves = state.current.m - userMovesPlayed;
+  const pliesNeeded = 2 * remainingFullMoves;
+  const attacker = state.current.s;
+  const fen = state.game.fen();
+
+  let ok = false;
+  if (state.sfReady) {
+    const movetime = remainingFullMoves <= 1 ? 150 : (remainingFullMoves === 2 ? 300 : 600);
+    const result = await engineAnalyze(fen, { movetime });
+    if (result.mateIn !== null && result.mateIn < 0) {
+      ok = (-result.mateIn) <= remainingFullMoves;
+    }
+  } else {
+    await new Promise(r => setTimeout(r, 30));
+    try {
+      ok = jsCanForceMate(state.game, pliesNeeded, attacker);
+    } catch (e) {
+      console.error('JS solver error:', e);
+    }
+  }
+
+  if (ok) onCorrectFirstMove(userMove);
+  else onWrongMove(userMove);
+}
+
+async function verifyOpponentMove(userMove) {
+  // The user just played a defender's move. Verify the position is still winning for
+  // the attacker. We accept any legal defender move that's not "objectively worse" —
+  // i.e., the attacker can still force mate within the original budget plus a bit of slack.
+  setStatus('thinking', 'Checking the defense…',
+    'Confirming the defense is reasonable.');
+  state.ui = 'thinking';
+
+  const ownMovesPlayed = state.history.filter(h => h.side === state.current.s).length;
+  const remainingFullMoves = state.current.m - ownMovesPlayed;
+  // After defender's move, attacker is to move. Attacker should be able to mate in
+  // remainingFullMoves from this position.
+  const fen = state.game.fen();
+
+  let canStillMate = false;
+  if (state.sfReady) {
+    const movetime = remainingFullMoves <= 1 ? 200 : 400;
+    const result = await engineAnalyze(fen, { movetime });
+    // Engine reports mateIn from side-to-move's perspective; it's now ATTACKER's turn,
+    // so mateIn > 0 means attacker can still mate.
+    if (result.mateIn !== null && result.mateIn > 0) {
+      canStillMate = (result.mateIn <= remainingFullMoves);
+    }
+  } else {
+    await new Promise(r => setTimeout(r, 30));
+    try {
+      // After defender's move, attacker is to move. Plies until mate = 2*N - 1.
+      const plies = 2 * remainingFullMoves - 1;
+      canStillMate = jsCanForceMate(state.game, plies, state.current.s);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  if (canStillMate) {
+    onValidOpponentMove(userMove);
+  } else {
+    onPoorOpponentMove(userMove);
+  }
+}
+
+function onValidOpponentMove(userMove) {
+  setStatus('idle', 'Defense accepted.',
+    userMove.san + ' is a reasonable try. Now find the move that finishes the mate.');
+  highlightSquare(userMove.to, 'highlight-last');
+  state.playingOpponent = false;  // back to user's own side
+  state.ui = 'ready';
+  setTimeout(clearHighlights, 1200);
+}
+
+function onPoorOpponentMove(userMove) {
+  // The defender's move was so bad the attacker can no longer force mate within the
+  // required budget — usually means the user blundered as defender (e.g. allowed mate
+  // immediately or made an illegal-feeling defense).
+  // For training purposes, we just undo this move and ask them to try a stronger defense.
+  setStatus('wrong', 'Try a tougher defense.',
+    userMove.san + ' lets the attacker mate too easily. Pick the strongest defense.');
+  highlightSquare(userMove.to, 'highlight-wrong');
+  setTimeout(() => {
+    state.game.undo();
+    state.history.pop();
+    state.board.position(state.game.fen(), true);
+    renderScoresheet();
+    state.ui = 'ready';
+    clearHighlights();
+  }, 1500);
+}
+
+function onOpponentMoveBlunder(userMove) {
+  // Defender stumbled into mate (e.g. moving the king into check). Treat as a wrong move.
+  setStatus('wrong', 'That walks into mate.',
+    'Try a defense that doesn\u2019t allow immediate mate.');
+  setTimeout(() => {
+    state.game.undo();
+    state.history.pop();
+    state.board.position(state.game.fen(), true);
+    renderScoresheet();
+    state.ui = 'ready';
+    clearHighlights();
+  }, 1500);
+}
+
+function verifyNonMateMove(userMove) {
+  // For non-mate puzzles (miniatures, wins, draws, polgar):
+  // Accept moves matching the book's main_line at the current step.
+  const userMovesPlayed = state.history.filter(h => h.side === state.current.s).length;
+  // The user's k-th move should match main_line[2*(k-1)] (0-indexed, every other move is theirs)
+  // But the book's main_line is just a sequence of all moves alternating, so user moves are
+  // at indices 0, 2, 4, ... for the user's 1st, 2nd, 3rd... moves.
+  const ml = state.current.ml || [];
+  const expectedIndex = 2 * (userMovesPlayed - 1);
+  const expectedMove = ml[expectedIndex];
+
+  // Normalize for comparison (strip annotation marks)
+  const stripMarks = s => (s || '').replace(/[+#!?]/g, '').toLowerCase();
+  const userClean = stripMarks(userMove.san);
+  const expectedClean = stripMarks(expectedMove);
+
+  if (!expectedMove) {
+    // No book solution available — accept any move (data missing)
+    setStatus('idle', 'No reference solution', 
+      'This puzzle has no recorded solution; consider it complete.');
+    onCorrectFinalMove(userMove);
+    return;
+  }
+
+  if (userClean === expectedClean) {
+    // Correct! If there are more moves, continue; otherwise this is the final.
+    const isLast = (expectedIndex >= ml.length - 1);
+    if (isLast) {
+      onCorrectFinalMove(userMove);
+    } else {
+      onCorrectFirstMove(userMove);
+    }
+  } else {
+    onWrongMove(userMove);
+  }
+}
+
+function onCorrectFinalMove(userMove) {
+  state.ui = 'solved';
+  const wasFirstAttempt = (state.attemptCount === 1 && !state.firstAttemptScored);
+  if (wasFirstAttempt) {
+    state.firstAttemptScored = true;
+    state.solved.add(state.current.i);
+    const result = recordAttempt(state.current, true);  // +rating, daily count
+    setStatus('solved', 'Checkmate!',
+      userMove.san + ' delivers mate. Beautifully done — first try! +' +
+      ratingDeltaFor(state.current, true) + ' rating.');
+    if (state.reinforce) {
+      state.reinforce.correctCount++;
+      renderReinforcementBanner();
+    }
+    if (result.limitHit) showDailyLimitNotice();
+  } else if (state.missed.has(state.current.i)) {
+    setStatus('solved', 'Checkmate (practice).',
+      userMove.san + ' delivers mate. Good — but this puzzle stays in your Wrong Book.');
+  } else {
+    setStatus('solved', 'Checkmate!',
+      userMove.san + ' delivers mate. Beautifully done.');
+  }
+  highlightSquare(userMove.to, 'highlight-correct');
+  updateSolvedBadge();
+
+  if (state.reinforce) {
+    setTimeout(advanceReinforcement, 1800);
+  }
+}
+
+function onCorrectFirstMove(userMove) {
+  const wasFirstAttempt = (state.attemptCount === 1 && !state.firstAttemptScored);
+  if (wasFirstAttempt) {
+    state.firstAttemptScored = true;
+    state.solved.add(state.current.i);
+    const result = recordAttempt(state.current, true);
+    updateSolvedBadge();
+    if (state.reinforce) {
+      state.reinforce.correctCount++;
+      renderReinforcementBanner();
+    }
+    if (result.limitHit) {
+      // Don't interrupt the in-progress puzzle, but show notice
+      setTimeout(showDailyLimitNotice, 800);
+    }
+  }
+  setStatus('correct', 'Correct.',
+    userMove.san + ' starts the forced mate. Now play the opponent\u2019s best defense.');
+  highlightSquare(userMove.to, 'highlight-correct');
+  state.ui = 'ready';
+  state.playingOpponent = true;
+}
+
+async function playOpponentResponse() {
+  const userMovesPlayed = state.history.filter(h => h.side === state.current.s).length;
+  const remainingFullMoves = state.current.m - userMovesPlayed;
+  const fen = state.game.fen();
+
+  let move = null;
+  if (state.sfReady) {
+    // Engine plays best defender move
+    const result = await engineAnalyze(fen, { movetime: 400 });
+    if (result.bestmove && result.bestmove !== '(none)') {
+      const uci = result.bestmove;
+      const from = uci.substring(0, 2);
+      const to = uci.substring(2, 4);
+      const promo = uci.length > 4 ? uci.substring(4) : undefined;
+      move = state.game.move({ from, to, promotion: promo });
+    }
+  }
+  if (!move) {
+    // Fallback: pure JS or use book line
+    const def = jsFindBestDefense(state.game, state.current.s, 2 * remainingFullMoves);
+    if (def) {
+      move = state.game.move(def);
+    } else {
+      // Use book main_line
+      const idx = userMovesPlayed * 2 - 1;
+      const bookMove = (state.current.ml || [])[idx];
+      if (bookMove) {
+        try { move = state.game.move(bookMove, { sloppy: true }); } catch (e) {}
+      }
+    }
+  }
+
+  if (!move) {
+    setStatus('idle', 'Your move.', 'Continue.');
+    state.ui = 'ready';
+    return;
+  }
+
+  state.history.push({ side: move.color, san: move.san });
+  state.board.position(state.game.fen(), true);
+  renderScoresheet();
+  setTimeout(() => {
+    highlightSquare(move.from, 'highlight-last');
+    setTimeout(clearHighlights, 1200);
+  }, 250);
+
+  setStatus('idle', 'Your move.',
+    'Opponent played ' + move.san + '. Find the move that finishes the mate.');
+  state.ui = 'ready';
+}
+
+function onWrongMove(userMove) {
+  const wasFirstAttempt = (state.attemptCount === 1 && !state.firstAttemptScored);
+  if (wasFirstAttempt) {
+    state.firstAttemptScored = true;
+    state.missed.add(state.current.i);
+    const result = recordAttempt(state.current, false);
+    $('#missed-count').textContent = state.missed.size;
+
+    if (state.reinforce) {
+      setStatus('wrong', 'Not quite.',
+        userMove.san + ' doesn\'t work. Moving on… (' + ratingDeltaFor(state.current, false) + ' rating)');
+      setTimeout(advanceReinforcement, 1500);
+    } else {
+      setStatus('wrong', 'Not quite.',
+        userMove.san + ' doesn\'t lead to mate. Added to your Wrong Book. (' +
+        ratingDeltaFor(state.current, false) + ' rating)');
+      showReinforcementOffer();
+    }
+    updateSolvedBadge();
+    if (result.limitHit) setTimeout(showDailyLimitNotice, 800);
+  } else {
+    setStatus('wrong', 'Try again.',
+      userMove.san + ' doesn\'t lead to forced mate.');
+  }
+  highlightSquare(userMove.to, 'highlight-wrong');
+  setTimeout(() => {
+    state.game.undo();
+    state.history.pop();
+    state.board.position(state.game.fen(), true);
+    renderScoresheet();
+    state.ui = 'ready';
+    clearHighlights();
+  }, 1500);
+}
+
+// ============================================================
+// Reinforcement: practice 5 similar puzzles after a miss
+// ============================================================
+function showReinforcementOffer() {
+  const sim = state.current.sim || [];
+  if (sim.length === 0) return;
+  const offer = $('#reinforce-offer');
+  offer.innerHTML =
+    '<div class="reinforce-card">' +
+      '<div class="reinforce-headline">Want to practice this idea?</div>' +
+      '<div class="reinforce-detail">5 similar puzzles will help lock it in.</div>' +
+      '<button class="primary" id="btn-start-reinforce">Practice 5 similar →</button>' +
+    '</div>';
+  setTimeout(() => {
+    const btn = $('#btn-start-reinforce');
+    if (btn) btn.addEventListener('click', startReinforcement);
+  }, 0);
+}
+
+function clearReinforcementOffer() {
+  const offer = $('#reinforce-offer');
+  if (offer) offer.innerHTML = '';
+}
+
+function startReinforcement() {
+  const sim = (state.current.sim || []).slice(0, 5);
+  if (sim.length === 0) return;
+  state.reinforce = {
+    queue: sim,
+    index: 0,
+    correctCount: 0,
+    originId: state.current.i,
+    originFirstMove: state.current.fm,
+  };
+  clearReinforcementOffer();
+  loadPuzzle(sim[0]);
+  renderReinforcementBanner();
+}
+
+function advanceReinforcement() {
+  if (!state.reinforce) return;
+  state.reinforce.index++;
+  if (state.reinforce.index >= state.reinforce.queue.length) {
+    // Done! Show summary
+    finishReinforcement();
+    return;
+  }
+  loadPuzzle(state.reinforce.queue[state.reinforce.index]);
+  renderReinforcementBanner();
+}
+
+function finishReinforcement() {
+  const r = state.reinforce;
+  state.reinforce = null;
+  renderReinforcementBanner();
+  // Show a summary message
+  setStatus('idle', 'Practice complete.',
+    'You solved ' + r.correctCount + ' out of ' + r.queue.length + ' similar puzzles. ' +
+    'Returning to puzzle №' + r.originId + '.');
+  // Return to the original missed puzzle for one more attempt
+  setTimeout(() => loadPuzzle(r.originId), 1800);
+}
+
+function exitReinforcement() {
+  state.reinforce = null;
+  renderReinforcementBanner();
+  setStatus('idle', 'Practice cancelled.', 'Use the Browse panel to choose what to do next.');
+}
+
+function renderReinforcementBanner() {
+  const banner = $('#reinforce-banner');
+  if (!state.reinforce) {
+    banner.innerHTML = '';
+    banner.style.display = 'none';
+    return;
+  }
+  const r = state.reinforce;
+  banner.style.display = 'block';
+  banner.innerHTML =
+    '<div class="rb-track">' +
+      '<span class="rb-label">Practice round</span>' +
+      '<span class="rb-progress">' + (r.index + 1) + ' / ' + r.queue.length + '</span>' +
+      '<span class="rb-score">✓ ' + r.correctCount + '</span>' +
+      '<button id="btn-exit-reinforce" class="subtle" style="font-size:12px;padding:2px 8px;margin-left:auto;">Exit</button>' +
+    '</div>' +
+    '<div class="rb-hint">Inspired by puzzle №' + r.originId + ' (first move: ' + (r.originFirstMove || '?') + ')</div>';
+  setTimeout(() => {
+    const btn = $('#btn-exit-reinforce');
+    if (btn) btn.addEventListener('click', exitReinforcement);
+  }, 0);
+}
+
+// ============================================================
+// UI helpers
+// ============================================================
+function setStatus(kind, headline, detail) {
+  const el = $('#status');
+  el.className = 'status ' + kind + ' changed';
+  el.querySelector('.headline').textContent = headline;
+  el.querySelector('.detail').textContent = detail;
+  setTimeout(() => el.classList.remove('changed'), 250);
+}
+
+function highlightSquare(sq, cls) {
+  clearHighlights();
+  const el = document.querySelector('#board .square-' + sq);
+  if (el) el.classList.add(cls);
+}
+function clearHighlights() {
+  document.querySelectorAll('#board .square-55d63').forEach(el => {
+    el.classList.remove('highlight-correct', 'highlight-wrong', 'highlight-hint',
+                        'highlight-last', 'highlight-selected',
+                        'highlight-target', 'highlight-target-capture');
+  });
+}
+
+function renderScoresheet() {
+  const el = $('#scoresheet');
+  if (state.history.length === 0) {
+    el.innerHTML = '<span class="empty">No moves yet.</span>';
+    return;
+  }
+  const startingSide = state.current.s;
+  let html = '';
+  let moveNum = 1;
+  let i = 0;
+  if (startingSide === 'b') {
+    const m = state.history[0];
+    html += '<span class="move-num">1...</span><span class="move-b">' + m.san + '</span>';
+    i = 1;
+    moveNum = 2;
+  }
+  while (i < state.history.length) {
+    const wMove = state.history[i];
+    const bMove = state.history[i + 1];
+    html += '<span class="move-num">' + moveNum + '.</span>';
+    if (wMove) html += '<span class="move-w">' + wMove.san + '</span>';
+    if (bMove) html += '<span class="move-b">' + bMove.san + '</span>';
+    moveNum++;
+    i += 2;
+  }
+  el.innerHTML = html;
+}
+
+function updateSolvedBadge() {
+  const badge = $('#solved-badge');
+  if (!state.current) { badge.innerHTML = ''; return; }
+  const id = state.current.i;
+  if (state.solved.has(id) && !state.missed.has(id)) {
+    badge.innerHTML = '<span class="solved-tag">solved</span>';
+  } else if (state.missed.has(id)) {
+    badge.innerHTML = '<span class="missed-tag">in wrong book</span>' +
+      '<button id="btn-clear-wrong" class="subtle" style="font-size:11px;padding:2px 8px;margin-left:6px;">Remove</button>';
+    setTimeout(() => {
+      const btn = $('#btn-clear-wrong');
+      if (btn) btn.addEventListener('click', () => {
+        state.missed.delete(id);
+        saveProgress();
+        $('#missed-count').textContent = state.missed.size;
+        updateSolvedBadge();
+        renderProgressNote();
+      });
+    }, 0);
+  } else {
+    badge.innerHTML = '';
+  }
+}
+
+// ============================================================
+// Puzzle navigation
+// ============================================================
+function loadPuzzle(id) {
+  const p = state.byId.get(id);
+  if (!p) return;
+  state.current = p;
+  state.game = new Chess(p.f);
+  state.history = [];
+  state.ui = 'ready';
+  state.attemptCount = 0;
+  state.firstAttemptScored = false;
+  state.selectedSquare = null;
+  state.legalTargets = null;
+  clearReinforcementOffer();
+
+  $('#puzzle-id').textContent = '№ ' + p.i;
+  // Section name and goal text vary by kind
+  let sectionName, goalText, goalShort;
+  if (p.k === 'mate') {
+    sectionName = 'Mate in ' + p.m;
+    goalText = 'mate in ' + p.m;
+    goalShort = 'Mate in ' + p.m + '.';
+  } else if (p.k === 'miniature') {
+    sectionName = 'Miniature combination';
+    goalText = 'find the winning combination';
+    goalShort = 'Find the winning move.';
+  } else if (p.k === 'win') {
+    sectionName = 'Endgame: White wins';
+    goalText = 'find the winning move';
+    goalShort = 'White to win.';
+  } else if (p.k === 'draw') {
+    sectionName = 'Endgame: White draws';
+    goalText = 'find the drawing move';
+    goalShort = 'White to draw.';
+  } else if (p.k === 'polgar') {
+    sectionName = 'Polgár sisters\u2019 combination';
+    goalText = 'find the strongest move';
+    goalShort = 'Find the best move.';
+  } else {
+    sectionName = 'Puzzle';
+    goalText = 'find the move';
+    goalShort = 'Find the move.';
+  }
+  // Custom puzzle? Override section name with the user's label and add ↗ link if source URL present
+  const isCustom = p.i >= 100000;
+  let metaText = sectionName;
+  if (isCustom && p.label) {
+    metaText = p.label + ' · ' + sectionName;
+  } else if (isCustom) {
+    metaText = 'Saved puzzle · ' + sectionName;
+  }
+  $('#puzzle-meta').textContent = metaText;
+  $('#inp-puzzle').value = p.i;
+
+  $('#side-dot').className = 'side-dot ' + (p.s === 'w' ? 'white' : 'black');
+  $('#side-label').textContent = (p.s === 'w' ? 'White' : 'Black') +
+    ' to move — ' + goalText;
+
+  setupBoard(p.f, p.s === 'w' ? 'white' : 'black');
+
+  if (isDailyLimitHit()) {
+    showDailyLimitNotice();
+  } else {
+    let detail = 'Drag a piece (or click two squares) to make your move.';
+    if (isCustom && p.source) {
+      detail += ' (Source: ' + p.source + ')';
+    }
+    setStatus('idle', goalShort, detail);
+  }
+  $('#scoresheet').innerHTML = '<span class="empty">No moves yet.</span>';
+  clearHighlights();
+  updateSolvedBadge();
+  renderProfileUI();
+  updateMyPuzzlesBarVisibility();
+}
+
+function getFilteredIds() {
+  const f = state.filter;
+  if (f === 'all') return state.puzzles.map(p => p.i);
+  if (f === 'wrongbook') {
+    // Look across both bundled and custom puzzles
+    const allIds = [...state.byId.keys()];
+    return allIds.filter(id => state.missed.has(id)).sort((a, b) => a - b);
+  }
+  if (f === 'mypuzzles') {
+    if (!state.profile || !state.profile.myPuzzles) return [];
+    return state.profile.myPuzzles.map(p => p.i);
+  }
+  // String-keyed kinds: 'miniature', 'win', 'draw', 'polgar'
+  if (f === 'miniature' || f === 'win' || f === 'draw' || f === 'polgar') {
+    return state.puzzles.filter(p => p.k === f).map(p => p.i);
+  }
+  // Numeric: mate-in-N
+  const n = parseInt(f, 10);
+  return state.puzzles.filter(p => p.k === 'mate' && p.m === n).map(p => p.i);
+}
+
+function renderProgressNote() {
+  if (state.filter === 'wrongbook' && state.missed.size === 0) {
+    setStatus('idle', 'Your Wrong Book is empty.',
+      'Puzzles you miss on the first try will appear here for review.');
+  } else if (state.filter === 'mypuzzles' && (!state.profile || (state.profile.myPuzzles || []).length === 0)) {
+    setStatus('idle', 'No saved puzzles yet.',
+      'Click "+ Add puzzle" to save a position from Lichess, chess.com, or anywhere else.');
+  }
+}
+
+function nextPuzzle() {
+  const ids = getFilteredIds();
+  const cur = state.current ? state.current.i : 0;
+  const next = ids.find(i => i > cur);
+  loadPuzzle(next === undefined ? ids[0] : next);
+}
+function prevPuzzle() {
+  const ids = getFilteredIds();
+  const cur = state.current ? state.current.i : 0;
+  let prev = null;
+  for (const i of ids) { if (i < cur) prev = i; else break; }
+  loadPuzzle(prev === null ? ids[ids.length - 1] : prev);
+}
+function randomPuzzle() {
+  const ids = getFilteredIds();
+  const id = ids[Math.floor(Math.random() * ids.length)];
+  loadPuzzle(id);
+}
+
+// ============================================================
+// Hint / solution
+// ============================================================
+function showHint() {
+  if (state.ui !== 'ready') return;
+  if (state.history.length > 0) {
+    setStatus('idle', 'Hint', 'Reset the puzzle to see the first-move hint.');
+    return;
+  }
+  // Hints are friendly — they don't count as a missed puzzle, BUT they do mark
+  // the first attempt as "not a clean solve" — so even if she gets it right next,
+  // it won't be counted toward solved-on-first-try.
+  if (!state.firstAttemptScored) {
+    state.firstAttemptScored = true;
+    // Don't add to missed; just decline to add to solved.
+  }
+  const firstMove = state.current.fm;
+  if (!firstMove) {
+    setStatus('idle', 'No hint', 'Solution data missing for this puzzle.');
+    return;
+  }
+  const tempGame = new Chess(state.current.f);
+  let m;
+  try { m = tempGame.move(firstMove, { sloppy: true }); } catch (e) {}
+  if (m) {
+    highlightSquare(m.from, 'highlight-hint');
+    setStatus('idle', 'Hint',
+      'The piece on ' + m.from + ' is the key. Find its move.');
+  }
+}
+
+function showSolution() {
+  const sol = state.current.ml || [];
+  if (sol.length === 0) {
+    setStatus('idle', 'No solution', 'Solution data missing.');
+    return;
+  }
+  // If the user asks for the solution before solving, that counts as missing.
+  if (!state.firstAttemptScored) {
+    state.firstAttemptScored = true;
+    state.missed.add(state.current.i);
+    recordAttempt(state.current, false);
+    $('#missed-count').textContent = state.missed.size;
+    updateSolvedBadge();
+  }
+  const startingSide = state.current.s;
+  let txt = '';
+  let moveNum = 1;
+  let i = 0;
+  if (startingSide === 'b') {
+    txt += '1… ' + sol[0] + ' ';
+    i = 1;
+    moveNum = 2;
+  }
+  while (i < sol.length) {
+    txt += moveNum + '. ' + sol[i];
+    if (sol[i+1]) txt += ' ' + sol[i+1];
+    txt += ' ';
+    i += 2;
+    moveNum++;
+  }
+  setStatus('idle', 'Solution', txt.trim());
+}
+
+// ============================================================
+// Bindings & init
+// ============================================================
+function bindUI() {
+  $('#btn-prev').addEventListener('click', prevPuzzle);
+  $('#btn-next').addEventListener('click', nextPuzzle);
+  $('#btn-random').addEventListener('click', randomPuzzle);
+  $('#btn-hint').addEventListener('click', showHint);
+  $('#btn-solution').addEventListener('click', showSolution);
+  $('#btn-reset').addEventListener('click', () => loadPuzzle(state.current.i));
+
+  $('#sel-section').addEventListener('change', (e) => {
+    state.filter = e.target.value;
+    updateMyPuzzlesBarVisibility();
+    const ids = getFilteredIds();
+    if (ids.length) {
+      loadPuzzle(ids[0]);
+    } else {
+      renderProgressNote();
+    }
+  });
+
+  $('#inp-puzzle').addEventListener('change', (e) => {
+    const v = parseInt(e.target.value, 10);
+    if (state.byId.has(v)) loadPuzzle(v);
+    else e.target.value = state.current.i;
+  });
+
+  // My Puzzles buttons
+  $('#btn-add-puzzle').addEventListener('click', () => openAddPuzzleModal(null));
+  $('#btn-edit-puzzle').addEventListener('click', () => {
+    if (state.current && state.current.i >= 100000) {
+      openAddPuzzleModal(state.current);
+    }
+  });
+  $('#btn-delete-puzzle').addEventListener('click', deleteCurrentCustomPuzzle);
+
+  // Profile bar
+  $('#sel-profile').addEventListener('change', (e) => {
+    const name = e.target.value;
+    if (state.profiles[name]) {
+      setActiveProfile(name);
+      // Reload current puzzle (or pick a new one if the current was a custom puzzle of another profile)
+      if (state.current) {
+        if (state.current.i >= 100000 && !state.byId.has(state.current.i)) {
+          // Old profile's custom puzzle, no longer accessible — switch to mate-in-1
+          state.filter = '1';
+          $('#sel-section').value = '1';
+          updateMyPuzzlesBarVisibility();
+          randomPuzzle();
+        } else {
+          loadPuzzle(state.current.i);
+        }
+      }
+    }
+  });
+  $('#btn-new-profile').addEventListener('click', openNewProfileModal);
+  $('#btn-profile-settings').addEventListener('click', openSettingsModal);
+
+  // Modal close
+  $('#btn-modal-close').addEventListener('click', closeModal);
+  $('#modal-backdrop').addEventListener('click', (e) => {
+    if (e.target === $('#modal-backdrop')) closeModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && $('#modal-backdrop').style.display !== 'none') {
+      closeModal();
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if ($('#modal-backdrop').style.display !== 'none') return;
+    if (e.key === 'ArrowLeft') { prevPuzzle(); e.preventDefault(); }
+    if (e.key === 'ArrowRight') { nextPuzzle(); e.preventDefault(); }
+    if (e.key === 'r' || e.key === 'R') { randomPuzzle(); e.preventDefault(); }
+    if (e.key === 'h' || e.key === 'H') { showHint(); e.preventDefault(); }
+  });
+}
+
+function fadeOutBoot() {
+  const overlay = $('#boot-overlay');
+  overlay.classList.add('fade');
+  setTimeout(() => { overlay.style.display = 'none'; }, 400);
+}
+
+function init() {
+  try {
+    console.log('[Polgar] Init starting…');
+    bindUI();
+    loadProfiles();
+    loadActiveProfile();
+    console.log('[Polgar] Profiles loaded. Active:', state.profile && state.profile.name);
+
+    if (typeof window.POLGAR_PUZZLES === 'undefined') {
+      $('#boot-text').textContent = 'Could not load puzzles';
+      $('#boot-detail').textContent = 'Make sure puzzles_data.js is in the same folder as index.html.';
+      console.error('[Polgar] window.POLGAR_PUZZLES is undefined.');
+      return;
+    }
+    console.log('[Polgar] Puzzles available:', window.POLGAR_PUZZLES.length);
+
+    if (typeof Chess === 'undefined') {
+      $('#boot-text').textContent = 'chess.js failed to load';
+      $('#boot-detail').textContent = 'Check internet — needs chess.js from CDN. Refresh to retry.';
+      return;
+    }
+    if (typeof Chessboard === 'undefined') {
+      $('#boot-text').textContent = 'chessboard.js failed to load';
+      $('#boot-detail').textContent = 'Check internet — needs chessboard.js from CDN. Refresh to retry.';
+      return;
+    }
+    if (typeof window.jQuery === 'undefined') {
+      $('#boot-text').textContent = 'jQuery failed to load';
+      $('#boot-detail').textContent = 'chessboard.js needs jQuery. Check internet.';
+      return;
+    }
+    console.log('[Polgar] Libraries loaded: chess.js, chessboard.js, jQuery');
+
+    state.puzzles = window.POLGAR_PUZZLES;
+    state.puzzles.forEach(p => state.byId.set(p.i, p));
+    syncMyPuzzlesIntoIndex();
+    console.log('[Polgar] state.byId size:', state.byId.size);
+    $('#solved-count').textContent = state.solved.size;
+    $('#missed-count').textContent = state.missed.size;
+    $('#inp-puzzle').max = state.puzzles[state.puzzles.length - 1].i;
+
+    initEngine();
+    renderProfileUI();
+
+    state.filter = '1';
+    $('#sel-section').value = '1';
+
+    const ids = getFilteredIds();
+    console.log('[Polgar] Mate-in-1 puzzles found:', ids.length);
+    if (ids.length === 0) {
+      $('#boot-text').textContent = 'No puzzles found';
+      $('#boot-detail').textContent = 'Puzzle data appears empty or in an unexpected format. Check that puzzles_data.js is the latest version (should be ~835 KB).';
+      return;
+    }
+    const id = ids[Math.floor(Math.random() * ids.length)];
+    console.log('[Polgar] Loading puzzle id:', id);
+    loadPuzzle(id);
+    console.log('[Polgar] Puzzle loaded. state.current:', state.current && state.current.i);
+    fadeOutBoot();
+  } catch (err) {
+    console.error('[Polgar] Init failed:', err);
+    $('#boot-text').textContent = 'App failed to start';
+    $('#boot-detail').innerHTML =
+      'Error: ' + (err && err.message ? err.message : String(err)) +
+      '<br><br>Open the browser console (F12) for details.';
+  }
+}
+
+window.addEventListener('DOMContentLoaded', init);
+
+})();
+</script>
+</body>
+</html>
