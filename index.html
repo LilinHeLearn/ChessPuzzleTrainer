@@ -153,8 +153,8 @@
 
   #board { width: 480px; max-width: 100%; }
   @media (max-width: 720px) {
-    #board { width: 100%; max-width: 100vw; }
-    .board-frame { padding: 8px 8px 6px; }
+    #board { width: 100%; }
+    .board-frame { padding: 6px; }
     .board-frame::before, .board-frame::after { display: none; }
     .puzzle-label { font-size: 17px; gap: 8px; margin-bottom: 6px; }
     .puzzle-label .meta { font-size: 12px; }
@@ -2484,10 +2484,37 @@ function setupBoard(fen, orientation) {
     onDrop: handleDrop,
     onSnapEnd: () => state.board.position(state.game.fen(), false),
   });
-  // Attach click handlers for click-to-move
+  // Force a resize after the next paint cycle. On mobile, the container's width
+  // may not be settled when chessboard.js first measures it, leaving the board
+  // collapsed or invisible. Calling resize() after layout fixes this.
+  setTimeout(() => {
+    if (state.board) {
+      try { state.board.resize(); } catch (e) {}
+    }
+  }, 0);
+  setTimeout(() => {
+    if (state.board) {
+      try { state.board.resize(); } catch (e) {}
+    }
+  }, 200);
+  // Click handlers for click-to-move
   state.selectedSquare = null;
   attachClickHandlers();
 }
+
+// Window resize handler — keep the board sized to the container
+window.addEventListener('resize', () => {
+  if (state.board) {
+    try { state.board.resize(); } catch (e) {}
+  }
+});
+window.addEventListener('orientationchange', () => {
+  setTimeout(() => {
+    if (state.board) {
+      try { state.board.resize(); } catch (e) {}
+    }
+  }, 200);
+});
 
 function attachClickHandlers() {
   // Listen for clicks on every square. chessboard.js generates squares with
