@@ -2475,15 +2475,48 @@ function setupBoard(fen, orientation) {
   if (state.board) {
     try { state.board.destroy(); } catch (e) {}
   }
-  state.board = Chessboard('board', {
-    position: fen.split(' ')[0],
-    orientation: orientation,
-    draggable: true,
-    pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png',
-    onDragStart: handleDragStart,
-    onDrop: handleDrop,
-    onSnapEnd: () => state.board.position(state.game.fen(), false),
+  // Diagnostic: log container dimensions BEFORE chessboard.js sees it.
+  const boardEl = document.getElementById('board');
+  const beforeRect = boardEl ? boardEl.getBoundingClientRect() : null;
+  showDiag('Before Chessboard()', {
+    found: !!boardEl,
+    width: beforeRect ? Math.round(beforeRect.width) : '—',
+    height: beforeRect ? Math.round(beforeRect.height) : '—',
+    parentWidth: boardEl ? Math.round(boardEl.parentElement.getBoundingClientRect().width) : '—',
+    viewport: window.innerWidth + ' x ' + window.innerHeight,
+    libs: {
+      jQuery: typeof window.jQuery !== 'undefined',
+      Chessboard: typeof Chessboard !== 'undefined',
+      Chess: typeof Chess !== 'undefined',
+    },
   });
+  try {
+    state.board = Chessboard('board', {
+      position: fen.split(' ')[0],
+      orientation: orientation,
+      draggable: true,
+      pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png',
+      onDragStart: handleDragStart,
+      onDrop: handleDrop,
+      onSnapEnd: () => state.board.position(state.game.fen(), false),
+    });
+    // Diagnostic: log AFTER chessboard.js has rendered
+    setTimeout(() => {
+      const after = boardEl ? boardEl.getBoundingClientRect() : null;
+      const innerCount = boardEl ? boardEl.querySelectorAll('.square-55d63').length : 0;
+      const imgCount = boardEl ? boardEl.querySelectorAll('img').length : 0;
+      showDiag('After Chessboard()', {
+        boardWidth: after ? Math.round(after.width) : '—',
+        boardHeight: after ? Math.round(after.height) : '—',
+        squaresRendered: innerCount,
+        piecesRendered: imgCount,
+      });
+    }, 50);
+  } catch (err) {
+    showDiag('Chessboard() THREW', {
+      error: err && err.message ? err.message : String(err),
+    });
+  }
   // Force a resize after the next paint cycle. On mobile, the container's width
   // may not be settled when chessboard.js first measures it, leaving the board
   // collapsed or invisible. Calling resize() after layout fixes this.
@@ -2500,6 +2533,25 @@ function setupBoard(fen, orientation) {
   // Click handlers for click-to-move
   state.selectedSquare = null;
   attachClickHandlers();
+}
+
+// On-screen diagnostic panel (appears at top of page when ?debug=1 is in URL)
+function showDiag(label, info) {
+  if (!location.search.match(/[?&]debug=1/)) return;
+  let panel = document.getElementById('diag-panel');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = 'diag-panel';
+    panel.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#1c1410;color:#f4ead8;font-family:monospace;font-size:11px;padding:8px;z-index:9999;max-height:50vh;overflow-y:auto;border-bottom:2px solid #6b1d1d;';
+    document.body.appendChild(panel);
+  }
+  const entry = document.createElement('div');
+  entry.style.cssText = 'border-bottom:1px solid #4a3d31;padding:4px 0;';
+  entry.innerHTML = '<strong style="color:#a87a3a">' + label + ':</strong> ' +
+    Object.entries(info).map(([k, v]) =>
+      `${k}=<span style="color:#3d6b3a">${typeof v === 'object' ? JSON.stringify(v) : v}</span>`
+    ).join('  ');
+  panel.appendChild(entry);
 }
 
 // Window resize handler — keep the board sized to the container
