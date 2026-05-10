@@ -153,9 +153,10 @@
 
   #board { width: 480px; max-width: 100%; }
   @media (max-width: 720px) {
-    #board { width: 100%; }
-    .board-frame { padding: 6px; }
+    .board-panel { width: 100%; align-items: stretch; }
+    .board-frame { padding: 6px; width: 100%; box-sizing: border-box; }
     .board-frame::before, .board-frame::after { display: none; }
+    #board { width: 100%; }
     .puzzle-label { font-size: 17px; gap: 8px; margin-bottom: 6px; }
     .puzzle-label .meta { font-size: 12px; }
     .side-bar { font-size: 14px; gap: 8px; margin-top: 8px; }
