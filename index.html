@@ -1043,16 +1043,24 @@
       <div class="browse">
         <label for="sel-section">Section</label>
         <select id="sel-section">
-          <option value="all">All puzzles (5,333)</option>
-          <option value="1" selected>Mate in 1 (306)</option>
-          <option value="2">Mate in 2 (3,412)</option>
-          <option value="3">Mate in 3 (744)</option>
-          <option value="miniature">600 Miniatures (600)</option>
-          <option value="win">Endgame Wins (102)</option>
-          <option value="draw">Endgame Draws (42)</option>
-          <option value="polgar">Polgár Sisters (127)</option>
-          <option value="wrongbook">📕 Wrong Book — review</option>
-          <option value="mypuzzles">📓 My Puzzles — saved positions</option>
+          <optgroup label="By status">
+            <option value="new">📘 New — not done yet</option>
+            <option value="wrongbook">📕 Wrong Book — review</option>
+            <option value="mastered">✅ Mastered</option>
+          </optgroup>
+          <optgroup label="By type">
+            <option value="all">All puzzles (5,333)</option>
+            <option value="1" selected>Mate in 1 (306)</option>
+            <option value="2">Mate in 2 (3,412)</option>
+            <option value="3">Mate in 3 (744)</option>
+            <option value="miniature">600 Miniatures (600)</option>
+            <option value="win">Endgame Wins (102)</option>
+            <option value="draw">Endgame Draws (42)</option>
+            <option value="polgar">Polgár Sisters (127)</option>
+          </optgroup>
+          <optgroup label="Custom">
+            <option value="mypuzzles">📓 My Puzzles — saved positions</option>
+          </optgroup>
         </select>
 
         <label for="inp-puzzle">Puzzle №</label>
@@ -1072,7 +1080,7 @@
         </div>
       </div>
       <div class="progress">
-        <span>Solved: <span class="num" id="solved-count">0</span> · Wrong Book: <span class="wrong-book-stat" id="missed-count">0</span></span>
+        <span>📘 New: <span class="num" id="new-count">—</span> · 📕 Wrong Book: <span class="wrong-book-stat" id="missed-count">0</span> · ✅ Mastered: <span class="num" id="solved-count">0</span></span>
         <span class="engine-pill">
           <span class="engine-dot" id="engine-dot"></span>
           <span id="engine-status">Engine starting…</span>
@@ -1175,18 +1183,23 @@ function emptyProfile(name) {
     name,
     created: new Date().toISOString(),
     rating: 1000,
-    solved: [],
-    missed: [],
-    dailyLimit: 0,  // 0 = unlimited
+    solved: [],         // mastered (first-try solves + graduated wrong-book reviews)
+    missed: [],         // currently in Wrong Book
+    reviewProgress: {}, // { puzzleId: count_of_correct_reviews } — for Wrong-Book graduation
+    dailyLimit: 0,
     dailyHistory: {},
     totalAttempts: 0,
     totalCorrect: 0,
     totalWrong: 0,
     bestStreak: 0,
     currentStreak: 0,
-    myPuzzles: [],  // user's own collection of saved puzzles
+    myPuzzles: [],
   };
 }
+
+// How many correct reviews of a Wrong-Book puzzle are needed to "graduate" it
+// (move it back from Wrong Book to Mastered).
+const REVIEW_GRADUATION = 2;
 
 // ============================================================
 // Profile storage
@@ -1224,8 +1237,9 @@ function setActiveProfile(name) {
   state.profile = state.profiles[name];
   state.solved = new Set(state.profile.solved);
   state.missed = new Set(state.profile.missed);
-  // Backfill myPuzzles for older profiles
+  // Backfill myPuzzles and reviewProgress for older profiles
   if (!state.profile.myPuzzles) state.profile.myPuzzles = [];
+  if (!state.profile.reviewProgress) state.profile.reviewProgress = {};
   syncMyPuzzlesIntoIndex();
   try { localStorage.setItem(ACTIVE_KEY, name); } catch (e) {}
   renderProfileUI();
@@ -1356,9 +1370,24 @@ function renderProfileUI() {
   if (sEl) {
     sEl.textContent = state.profile.currentStreak;
   }
-  // Solved/missed counters
+  // Three-counter progress: New / Wrong Book / Mastered (across all bundled puzzles)
+  // Note: state.byId might not be populated yet during early init; guard against that.
   if ($('#solved-count')) $('#solved-count').textContent = state.solved.size;
   if ($('#missed-count')) $('#missed-count').textContent = state.missed.size;
+  if ($('#new-count')) {
+    if (state.byId && state.byId.size > 0) {
+      // Count bundled puzzles (id < 100000) that are neither solved nor missed
+      let newCount = 0;
+      for (const id of state.byId.keys()) {
+        if (id < 100000 && !state.solved.has(id) && !state.missed.has(id)) {
+          newCount++;
+        }
+      }
+      $('#new-count').textContent = newCount;
+    } else {
+      $('#new-count').textContent = '—';
+    }
+  }
 }
 
 function showDailyLimitNotice() {
@@ -3113,10 +3142,13 @@ async function verifyNonMateMove(userMove) {
 function onCorrectFinalMove(userMove) {
   state.ui = 'solved';
   const wasFirstAttempt = (state.attemptCount === 1 && !state.firstAttemptScored);
-  if (wasFirstAttempt) {
+  const wasInWrongBook = state.missed.has(state.current.i);
+
+  if (wasFirstAttempt && !wasInWrongBook) {
+    // Clean first-try solve on a puzzle they've never missed → master it
     state.firstAttemptScored = true;
     state.solved.add(state.current.i);
-    const result = recordAttempt(state.current, true);  // +rating, daily count
+    const result = recordAttempt(state.current, true);
     setStatus('solved', 'Checkmate!',
       userMove.san + ' delivers mate. Beautifully done — first try! +' +
       ratingDeltaFor(state.current, true) + ' rating.');
@@ -3125,12 +3157,35 @@ function onCorrectFinalMove(userMove) {
       renderReinforcementBanner();
     }
     if (result.limitHit) showDailyLimitNotice();
-  } else if (state.missed.has(state.current.i)) {
-    setStatus('solved', 'Checkmate (practice).',
-      userMove.san + ' delivers mate. Good — but this puzzle stays in your Wrong Book.');
+  } else if (wasFirstAttempt && wasInWrongBook) {
+    // Clean first-try solve on a Wrong-Book puzzle → progress toward graduation
+    state.firstAttemptScored = true;
+    if (!state.profile.reviewProgress) state.profile.reviewProgress = {};
+    const id = state.current.i;
+    state.profile.reviewProgress[id] = (state.profile.reviewProgress[id] || 0) + 1;
+    const reviewsDone = state.profile.reviewProgress[id];
+    const result = recordAttempt(state.current, true);
+    if (reviewsDone >= REVIEW_GRADUATION) {
+      // Graduate from Wrong Book to Mastered
+      state.missed.delete(id);
+      state.solved.add(id);
+      delete state.profile.reviewProgress[id];
+      setStatus('solved', 'Checkmate! Graduated!',
+        userMove.san + ' delivers mate. You\u2019ve mastered this puzzle — removed from Wrong Book. +' +
+        ratingDeltaFor(state.current, true) + ' rating.');
+    } else {
+      const need = REVIEW_GRADUATION - reviewsDone;
+      setStatus('solved', 'Checkmate! Review progress.',
+        userMove.san + ' delivers mate. Solve correctly ' + need + ' more time' + (need === 1 ? '' : 's') +
+        ' to graduate from Wrong Book. +' + ratingDeltaFor(state.current, true) + ' rating.');
+    }
+    saveProgress();
+    renderProfileUI();
+    if (result.limitHit) showDailyLimitNotice();
   } else {
-    setStatus('solved', 'Checkmate!',
-      userMove.san + ' delivers mate. Beautifully done.');
+    // Subsequent attempts in the same session (already scored)
+    setStatus('solved', 'Checkmate (practice).',
+      userMove.san + ' delivers mate. Good practice — but this puzzle stays in your Wrong Book.');
   }
   highlightSquare(userMove.to, 'highlight-correct');
   updateSolvedBadge();
@@ -3142,9 +3197,23 @@ function onCorrectFinalMove(userMove) {
 
 function onCorrectFirstMove(userMove) {
   const wasFirstAttempt = (state.attemptCount === 1 && !state.firstAttemptScored);
+  const wasInWrongBook = state.missed.has(state.current.i);
+
   if (wasFirstAttempt) {
     state.firstAttemptScored = true;
-    state.solved.add(state.current.i);
+
+    if (wasInWrongBook) {
+      // Wrong-Book review: increment progress, don't auto-add to solved yet.
+      // The final move handler (onCorrectFinalMove) will do the graduation.
+      if (!state.profile.reviewProgress) state.profile.reviewProgress = {};
+      // Note: don't increment here — onCorrectFinalMove does it on the LAST move.
+      // For mate-in-1 first-move IS the last move (handled by onCorrectFinalMove).
+      // For mate-in-2/3, increment happens when they deliver the final mate.
+    } else {
+      // Not in wrong book — add to solved (for mate-in-2/3, this is the early-commit;
+      // user still needs to finish the mate, but they've shown they know the start.)
+      state.solved.add(state.current.i);
+    }
     const result = recordAttempt(state.current, true);
     updateSolvedBadge();
     if (state.reinforce) {
@@ -3152,7 +3221,6 @@ function onCorrectFirstMove(userMove) {
       renderReinforcementBanner();
     }
     if (result.limitHit) {
-      // Don't interrupt the in-progress puzzle, but show notice
       setTimeout(showDailyLimitNotice, 800);
     }
   }
@@ -3216,9 +3284,15 @@ async function playOpponentResponse() {
 
 function onWrongMove(userMove) {
   const wasFirstAttempt = (state.attemptCount === 1 && !state.firstAttemptScored);
+  const wasInWrongBook = state.missed.has(state.current.i);
   if (wasFirstAttempt) {
     state.firstAttemptScored = true;
     state.missed.add(state.current.i);
+    // If this puzzle was already in Wrong Book and is being re-missed,
+    // reset its review progress — they need to start over toward graduation.
+    if (wasInWrongBook && state.profile.reviewProgress) {
+      delete state.profile.reviewProgress[state.current.i];
+    }
     const result = recordAttempt(state.current, false);
     $('#missed-count').textContent = state.missed.size;
 
@@ -3227,8 +3301,11 @@ function onWrongMove(userMove) {
         userMove.san + ' doesn\'t work. Moving on… (' + ratingDeltaFor(state.current, false) + ' rating)');
       setTimeout(advanceReinforcement, 1500);
     } else {
+      const wrongBookMsg = wasInWrongBook
+        ? ' Review progress reset.'
+        : ' Added to your Wrong Book.';
       setStatus('wrong', 'Not quite.',
-        userMove.san + ' doesn\'t lead to mate. Added to your Wrong Book. (' +
+        userMove.san + ' doesn\'t lead to mate.' + wrongBookMsg + ' (' +
         ratingDeltaFor(state.current, false) + ' rating)');
       showReinforcementOffer();
     }
@@ -3398,18 +3475,23 @@ function updateSolvedBadge() {
   if (!state.current) { badge.innerHTML = ''; return; }
   const id = state.current.i;
   if (state.solved.has(id) && !state.missed.has(id)) {
-    badge.innerHTML = '<span class="solved-tag">solved</span>';
+    badge.innerHTML = '<span class="solved-tag">mastered</span>';
   } else if (state.missed.has(id)) {
-    badge.innerHTML = '<span class="missed-tag">in wrong book</span>' +
+    const progress = (state.profile && state.profile.reviewProgress && state.profile.reviewProgress[id]) || 0;
+    const need = REVIEW_GRADUATION - progress;
+    const reviewHint = progress > 0
+      ? ` (${need} more correct to graduate)`
+      : '';
+    badge.innerHTML = '<span class="missed-tag">in wrong book' + reviewHint + '</span>' +
       '<button id="btn-clear-wrong" class="subtle" style="font-size:11px;padding:2px 8px;margin-left:6px;">Remove</button>';
     setTimeout(() => {
       const btn = $('#btn-clear-wrong');
       if (btn) btn.addEventListener('click', () => {
         state.missed.delete(id);
+        if (state.profile.reviewProgress) delete state.profile.reviewProgress[id];
         saveProgress();
-        $('#missed-count').textContent = state.missed.size;
+        renderProfileUI();
         updateSolvedBadge();
-        renderProgressNote();
       });
     }, 0);
   } else {
@@ -3497,11 +3579,23 @@ function loadPuzzle(id) {
 function getFilteredIds() {
   const f = state.filter;
   if (f === 'all') return state.puzzles.map(p => p.i);
+
+  // Status-based filters: cross-cut puzzle types
   if (f === 'wrongbook') {
-    // Look across both bundled and custom puzzles
     const allIds = [...state.byId.keys()];
     return allIds.filter(id => state.missed.has(id)).sort((a, b) => a - b);
   }
+  if (f === 'mastered') {
+    const allIds = [...state.byId.keys()];
+    return allIds.filter(id => state.solved.has(id) && !state.missed.has(id)).sort((a, b) => a - b);
+  }
+  if (f === 'new') {
+    // "New" = bundled puzzle (id < 100000) that's never been attempted (not in solved, not in missed)
+    return state.puzzles
+      .map(p => p.i)
+      .filter(id => !state.solved.has(id) && !state.missed.has(id));
+  }
+
   if (f === 'mypuzzles') {
     if (!state.profile || !state.profile.myPuzzles) return [];
     return state.profile.myPuzzles.map(p => p.i);
@@ -3515,6 +3609,23 @@ function getFilteredIds() {
   return state.puzzles.filter(p => p.k === 'mate' && p.m === n).map(p => p.i);
 }
 
+// For type-based sections (Mate in 1, Mate in 2, Miniatures, etc.), prioritize
+// puzzles the user hasn't done yet, then Wrong-Book ones, and SKIP mastered ones
+// (unless the user explicitly selects "Mastered" or "All").
+function getPracticeIds() {
+  const f = state.filter;
+  // Status filters and 'all' use their own ID list as-is
+  if (f === 'all' || f === 'wrongbook' || f === 'mastered' || f === 'new' || f === 'mypuzzles') {
+    return getFilteredIds();
+  }
+  // Type-based filter: split into new and review (wrong-book) — hide mastered
+  const typeIds = getFilteredIds();
+  const newIds = typeIds.filter(id => !state.solved.has(id) && !state.missed.has(id));
+  const reviewIds = typeIds.filter(id => state.missed.has(id));
+  // Practice priority: new puzzles first, then wrong-book review (mastered excluded)
+  return [...newIds, ...reviewIds];
+}
+
 function renderProgressNote() {
   if (state.filter === 'wrongbook' && state.missed.size === 0) {
     setStatus('idle', 'Your Wrong Book is empty.',
@@ -3526,22 +3637,79 @@ function renderProgressNote() {
 }
 
 function nextPuzzle() {
-  const ids = getFilteredIds();
+  const ids = getPracticeIds();
+  if (ids.length === 0) {
+    showAllDoneNotice();
+    return;
+  }
   const cur = state.current ? state.current.i : 0;
   const next = ids.find(i => i > cur);
   loadPuzzle(next === undefined ? ids[0] : next);
 }
 function prevPuzzle() {
-  const ids = getFilteredIds();
+  const ids = getPracticeIds();
+  if (ids.length === 0) {
+    showAllDoneNotice();
+    return;
+  }
   const cur = state.current ? state.current.i : 0;
   let prev = null;
   for (const i of ids) { if (i < cur) prev = i; else break; }
   loadPuzzle(prev === null ? ids[ids.length - 1] : prev);
 }
 function randomPuzzle() {
-  const ids = getFilteredIds();
-  const id = ids[Math.floor(Math.random() * ids.length)];
+  const f = state.filter;
+  // For status-based and special filters, just pick uniformly from that list
+  if (f === 'all' || f === 'wrongbook' || f === 'mastered' || f === 'new' || f === 'mypuzzles') {
+    const ids = getFilteredIds();
+    if (ids.length === 0) { showAllDoneNotice(); return; }
+    const id = ids[Math.floor(Math.random() * ids.length)];
+    loadPuzzle(id);
+    return;
+  }
+
+  // Type-based filter: weighted mix of New + Wrong Book within this section.
+  // Roughly 30% chance to pull from Wrong Book (if non-empty), otherwise New.
+  // Mastered puzzles are excluded.
+  const typeIds = getFilteredIds();
+  const newIds = typeIds.filter(id => !state.solved.has(id) && !state.missed.has(id));
+  const reviewIds = typeIds.filter(id => state.missed.has(id));
+
+  if (newIds.length === 0 && reviewIds.length === 0) {
+    showAllDoneNotice();
+    return;
+  }
+
+  // Wrong Book first: if there are puzzles to review, always pick from there.
+  // Only pull from New when Wrong Book is empty.
+  let pickFromReview;
+  if (reviewIds.length > 0) pickFromReview = true;
+  else pickFromReview = false;
+
+  const pool = pickFromReview ? reviewIds : newIds;
+  const id = pool[Math.floor(Math.random() * pool.length)];
   loadPuzzle(id);
+}
+
+function showAllDoneNotice() {
+  // All puzzles in the current section are mastered, OR section is empty
+  const f = state.filter;
+  if (f === 'new') {
+    setStatus('idle', 'No new puzzles to try.',
+      'You\u2019ve attempted every puzzle in the book at least once. Switch to "Wrong Book" to review missed ones, or pick a type from the dropdown.');
+  } else if (f === 'wrongbook') {
+    setStatus('idle', 'Wrong Book is empty.',
+      'No puzzles to review right now. Puzzles you miss on the first try will appear here.');
+  } else if (f === 'mastered') {
+    setStatus('idle', 'No mastered puzzles yet.',
+      'Puzzles you\u2019ve solved on the first try (or graduated from your Wrong Book) appear here.');
+  } else if (f === 'mypuzzles') {
+    setStatus('idle', 'No saved puzzles yet.',
+      'Click "+ Add puzzle" to save a position from Lichess, chess.com, or anywhere else.');
+  } else {
+    setStatus('idle', 'Section complete!',
+      'You\u2019ve mastered every puzzle in this section. Switch to "Wrong Book", "Mastered", or pick another section.');
+  }
 }
 
 // ============================================================
@@ -3622,11 +3790,12 @@ function bindUI() {
   $('#sel-section').addEventListener('change', (e) => {
     state.filter = e.target.value;
     updateMyPuzzlesBarVisibility();
-    const ids = getFilteredIds();
+    const ids = getPracticeIds();
     if (ids.length) {
       loadPuzzle(ids[0]);
     } else {
-      renderProgressNote();
+      // Practice list empty — show the friendly explainer instead of loading an irrelevant puzzle
+      showAllDoneNotice();
     }
   });
 
