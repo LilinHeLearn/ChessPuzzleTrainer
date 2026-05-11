@@ -2941,7 +2941,7 @@ async function verifyMove(userMove) {
 async function verifyOpponentMove(userMove) {
   // The user just played a defender's move. Verify the position is still winning for
   // the attacker. We accept any legal defender move that's not "objectively worse" —
-  // i.e., the attacker can still force mate within the original budget plus a bit of slack.
+  // i.e., the attacker can still force mate within the original budget.
   setStatus('thinking', 'Checking the defense…',
     'Confirming the defense is reasonable.');
   state.ui = 'thinking';
@@ -2953,22 +2953,28 @@ async function verifyOpponentMove(userMove) {
   const fen = state.game.fen();
 
   let canStillMate = false;
+
+  // First try engine if loaded
   if (state.sfReady) {
-    const movetime = remainingFullMoves <= 1 ? 200 : 400;
+    // Give Stockfish enough time on phones. Same generous timing as the main check.
+    const movetime = remainingFullMoves <= 1 ? 500 : 800;
     const result = await engineAnalyze(fen, { movetime });
-    // Engine reports mateIn from side-to-move's perspective; it's now ATTACKER's turn,
-    // so mateIn > 0 means attacker can still mate.
+    // Engine reports mateIn from side-to-move's perspective. It's now ATTACKER's turn,
+    // so positive mateIn means attacker can still mate.
     if (result.mateIn !== null && result.mateIn > 0) {
       canStillMate = (result.mateIn <= remainingFullMoves);
     }
-  } else {
+  }
+
+  // If engine didn't find a mate (or timed out), use the JS solver as authoritative.
+  if (!canStillMate) {
     await new Promise(r => setTimeout(r, 30));
     try {
       // After defender's move, attacker is to move. Plies until mate = 2*N - 1.
       const plies = 2 * remainingFullMoves - 1;
       canStillMate = jsCanForceMate(state.game, plies, state.current.s);
     } catch (e) {
-      console.error(e);
+      console.error('JS solver error:', e);
     }
   }
 
