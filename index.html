@@ -2048,7 +2048,8 @@ function openAddPuzzleModal(existingPuzzle) {
     <div class="modal-actions">
       <button class="subtle" id="ap-cancel">Cancel</button>
       <button class="primary" id="ap-save">${isEdit ? 'Save changes' : 'Add puzzle'}</button>
-    </div>`,
+    </div>
+    <div id="ap-autofind-status" style="font-size:12px;color:var(--ink-soft);margin-top:6px;font-style:italic;text-align:right;"></div>`,
     () => {
       // ===== Tab switching =====
       document.querySelectorAll('.ap-tab').forEach(tab => {
@@ -2205,9 +2206,48 @@ function openAddPuzzleModal(existingPuzzle) {
       kindSel.addEventListener('change', updateMateInVisibility);
 
       $('#ap-cancel').addEventListener('click', closeModal);
-      $('#ap-save').addEventListener('click', () => {
+
+      // Try to find the answer with the engine. Returns {firstMove, mainLine, kind, mateIn} or null.
+      // Does NOT mutate inputs; caller decides what to do.
+      async function autoFindAnswer(fen) {
+        if (!state.sfReady) return null;
+        try {
+          const quick = await engineAnalyze(fen, { movetime: 800 });
+          if (quick.mateIn !== null && quick.mateIn > 0) {
+            // Forced mate
+            const moves = await buildMainLine(fen, Math.max(1, 2 * quick.mateIn));
+            return {
+              firstMove: moves[0] || null,
+              mainLine: moves.slice(1).join(' '),
+              kind: 'mate',
+              mateIn: quick.mateIn,
+              eval: { type: 'mate', value: quick.mateIn },
+            };
+          } else if (quick.bestmove) {
+            // Not a forced mate — accept engine's best move as the "answer"
+            const moves = await buildMainLine(fen, 6);
+            const cp = quick.cp !== null ? quick.cp : 0;
+            let kind = 'win';
+            // If eval is very close to zero, label as draw puzzle
+            if (Math.abs(cp) < 30) kind = 'draw';
+            return {
+              firstMove: moves[0] || null,
+              mainLine: moves.slice(1).join(' '),
+              kind,
+              mateIn: 0,
+              eval: { type: 'cp', value: cp },
+            };
+          }
+        } catch (e) {
+          console.error('Auto-find error:', e);
+        }
+        return null;
+      }
+
+      $('#ap-cancel').addEventListener('click', closeModal);
+
+      $('#ap-save').addEventListener('click', async () => {
         // Determine FEN: editor is the source of truth (the FEN textbox is just for display)
-        // If the editor has any pieces, use it. Otherwise check the FEN textbox.
         let fen = '';
         const hasEditor = editor.squares.some(c => c !== null);
         if (hasEditor) {
@@ -2215,21 +2255,89 @@ function openAddPuzzleModal(existingPuzzle) {
         } else {
           fen = $('#ap-fen').value.trim();
         }
-        const firstMove = $('#ap-firstmove').value.trim();
-        const mainLine = $('#ap-mainline').value.trim();
-        const kind = kindSel.value;
-        const mateIn = parseInt($('#ap-matein').value, 10) || 1;
+        let firstMove = $('#ap-firstmove').value.trim();
+        let mainLine = $('#ap-mainline').value.trim();
+        let kind = kindSel.value;
+        let mateIn = parseInt($('#ap-matein').value, 10) || 1;
         const label = $('#ap-label').value.trim();
         const source = $('#ap-source').value.trim();
 
         if (!fen) { alert('Please set up a position (image, editor, or FEN).'); return; }
-        if (kind === 'mate' && (mateIn < 1 || mateIn > 10)) {
-          alert('Please enter a valid mate-in number (1-10).');
-          return;
-        }
+
         // Reject any unknown placeholder pieces
         if (editor.squares.some(c => c === '?W' || c === '?B')) {
           alert('Some squares still have placeholder pieces (○ or ●). Click each one and pick the actual piece type.');
+          return;
+        }
+
+        // Validate the FEN first
+        try { new Chess(fen); }
+        catch (e) {
+          alert('Invalid position: ' + e.message);
+          return;
+        }
+        // Sanity check on king count when editor was used
+        if (hasEditor) {
+          const wK = editor.squares.filter(c => c === 'K').length;
+          const bK = editor.squares.filter(c => c === 'k').length;
+          if (wK !== 1 || bK !== 1) {
+            alert(`Position needs exactly one of each king (now ${wK} white, ${bK} black).`);
+            return;
+          }
+        }
+
+        // If the user didn't fill in the first move, run the engine to find it.
+        const saveBtn = $('#ap-save');
+        const status = $('#ap-autofind-status');
+        if (!firstMove) {
+          if (!state.sfReady) {
+            // Engine not ready yet — wait a few seconds for it to load
+            status.textContent = 'Waiting for engine to load…';
+            status.style.color = 'var(--ink-soft)';
+            const startWait = Date.now();
+            while (!state.sfReady && Date.now() - startWait < 10000) {
+              await new Promise(r => setTimeout(r, 250));
+            }
+          }
+          if (!state.sfReady) {
+            // Still not ready — save anyway, with no answer recorded.
+            // The puzzle will check correctness against the engine the first time it's solved.
+            status.textContent = 'Engine unavailable — saving without answer.';
+            status.style.color = 'var(--ink-soft)';
+          } else {
+            saveBtn.disabled = true;
+            status.textContent = 'Engine thinking…';
+            status.style.color = 'var(--ink-soft)';
+            const found = await autoFindAnswer(fen);
+            saveBtn.disabled = false;
+            if (found) {
+              firstMove = found.firstMove || '';
+              if (found.mainLine) mainLine = found.mainLine;
+              kind = found.kind;
+              if (found.mateIn) mateIn = found.mateIn;
+              // Show what was found
+              if (found.eval.type === 'mate') {
+                status.textContent = `Found forced mate in ${found.eval.value}.`;
+              } else {
+                const cp = found.eval.value;
+                status.textContent = `Best move found. Engine eval: ${cp > 0 ? '+' : ''}${(cp/100).toFixed(2)}.`;
+              }
+              status.style.color = 'var(--green-correct)';
+              // Reflect in form so the user sees what was found (in case save fails)
+              $('#ap-firstmove').value = firstMove;
+              $('#ap-mainline').value = mainLine;
+              $('#ap-kind').value = kind;
+              $('#ap-matein').value = mateIn;
+            } else {
+              status.textContent = 'Engine could not find a clear answer — saving without.';
+              status.style.color = 'var(--ink-soft)';
+            }
+          }
+        }
+
+        // Validate final answer fields
+        if (kind === 'mate' && (mateIn < 1 || mateIn > 10)) {
+          alert('Please enter a valid mate-in number (1-10).');
           return;
         }
 
@@ -2362,6 +2470,28 @@ function engineAnalyze(fen, options) {
     state.sfQueue.push(job);
     processQueue();
   });
+}
+
+// Play engine's best moves from a starting position for up to maxPlies half-moves,
+// stopping early if mate is reached. Returns SAN move strings.
+async function buildMainLine(startFen, maxPlies) {
+  const moves = [];
+  let board;
+  try { board = new Chess(startFen); }
+  catch (e) { return moves; }
+  for (let i = 0; i < maxPlies; i++) {
+    if (board.game_over()) break;
+    const result = await engineAnalyze(board.fen(), { movetime: 400 });
+    if (!result.bestmove || result.bestmove === '(none)' || result.bestmove.length < 4) break;
+    // bestmove is in coordinate notation like 'e2e4' or 'e7e8q' (promotion)
+    const from = result.bestmove.substring(0, 2);
+    const to = result.bestmove.substring(2, 4);
+    const promotion = result.bestmove.length >= 5 ? result.bestmove[4] : undefined;
+    const moveObj = board.move({ from, to, promotion });
+    if (!moveObj) break;
+    moves.push(moveObj.san);
+  }
+  return moves;
 }
 
 function processQueue() {
@@ -2777,14 +2907,26 @@ async function verifyMove(userMove) {
   const fen = state.game.fen();
 
   let ok = false;
+
+  // First try the engine if it's loaded and quick
   if (state.sfReady) {
-    const movetime = remainingFullMoves <= 1 ? 150 : (remainingFullMoves === 2 ? 300 : 600);
+    // Give Stockfish enough time. Stockfish.js (WASM) on slow phones needs ~500ms
+    // even for mate-in-2 verification. Be generous.
+    const movetime = remainingFullMoves <= 1 ? 500 : (remainingFullMoves === 2 ? 800 : 1200);
     const result = await engineAnalyze(fen, { movetime });
+    // Engine reports mate from side-to-move's perspective. After user's correct
+    // attacker move, opponent is to move and is getting mated → negative mateIn.
     if (result.mateIn !== null && result.mateIn < 0) {
-      ok = (-result.mateIn) <= remainingFullMoves;
+      const attackerMatesIn = -result.mateIn;  // how many full moves until mate
+      ok = attackerMatesIn <= remainingFullMoves;
     }
-  } else {
-    await new Promise(r => setTimeout(r, 30));
+  }
+
+  // If the engine didn't find a mate (or isn't loaded), use the JS solver as
+  // a definitive fallback. The JS solver is exhaustive — if it says no mate,
+  // there really is no forced mate within the budget.
+  if (!ok) {
+    await new Promise(r => setTimeout(r, 30));  // let UI paint the "Checking…" text
     try {
       ok = jsCanForceMate(state.game, pliesNeeded, attacker);
     } catch (e) {
@@ -2878,30 +3020,77 @@ function onOpponentMoveBlunder(userMove) {
   }, 1500);
 }
 
-function verifyNonMateMove(userMove) {
-  // For non-mate puzzles (miniatures, wins, draws, polgar):
+async function verifyNonMateMove(userMove) {
+  // For non-mate puzzles (miniatures, wins, draws, polgar, custom):
   // Accept moves matching the book's main_line at the current step.
   const userMovesPlayed = state.history.filter(h => h.side === state.current.s).length;
   // The user's k-th move should match main_line[2*(k-1)] (0-indexed, every other move is theirs)
-  // But the book's main_line is just a sequence of all moves alternating, so user moves are
-  // at indices 0, 2, 4, ... for the user's 1st, 2nd, 3rd... moves.
   const ml = state.current.ml || [];
   const expectedIndex = 2 * (userMovesPlayed - 1);
   const expectedMove = ml[expectedIndex];
 
-  // Normalize for comparison (strip annotation marks)
   const stripMarks = s => (s || '').replace(/[+#!?]/g, '').toLowerCase();
   const userClean = stripMarks(userMove.san);
-  const expectedClean = stripMarks(expectedMove);
 
   if (!expectedMove) {
-    // No book solution available — accept any move (data missing)
-    setStatus('idle', 'No reference solution', 
+    // No book solution available. For custom puzzles (id >= 100000), try the
+    // engine: if the user played the engine's preferred move, accept it.
+    if (state.current.i >= 100000 && state.sfReady && userMovesPlayed === 1) {
+      // Compute the engine's choice for the position BEFORE the user's move
+      // (i.e. the original puzzle position)
+      setStatus('thinking', 'Checking with engine…',
+        'Comparing your move to the engine\u2019s best move.');
+      state.ui = 'thinking';
+      // We need the position before the user's move. state.game is AFTER the move.
+      // Undo, get FEN, restore.
+      const undone = state.game.undo();
+      const startFen = state.game.fen();
+      // Put the move back
+      if (undone) state.game.move(undone);
+
+      try {
+        const result = await engineAnalyze(startFen, { movetime: 800 });
+        if (result.bestmove && result.bestmove.length >= 4) {
+          const from = result.bestmove.substring(0, 2);
+          const to = result.bestmove.substring(2, 4);
+          // Compare with user's move
+          if (userMove.from === from && userMove.to === to) {
+            onCorrectFinalMove(userMove);
+            return;
+          }
+          // Also check via SAN — engine might give a different best move that's equivalent
+          // (rare but possible if there are multiple "best" moves with same eval)
+          const tmpBoard = new Chess(startFen);
+          const engineMove = tmpBoard.move({ from, to, promotion: result.bestmove[4] });
+          if (engineMove && stripMarks(engineMove.san) === userClean) {
+            onCorrectFinalMove(userMove);
+            return;
+          }
+          // Wrong: tell the user what the engine recommends
+          const engineSAN = engineMove ? engineMove.san : `${from}${to}`;
+          setStatus('wrong', `Engine prefers ${engineSAN}.`,
+            `Your move ${userMove.san} isn\u2019t the engine\u2019s top choice.`);
+          state.ui = 'wrong';
+          onWrongMove(userMove);
+          return;
+        }
+      } catch (e) {
+        console.error('Engine check failed:', e);
+      }
+      // Fallback if engine call fails: accept the move
+      setStatus('idle', 'No reference solution',
+        'Couldn\u2019t verify with engine; counting it as complete.');
+      onCorrectFinalMove(userMove);
+      return;
+    }
+    // Non-custom puzzle without answer: accept any move (data missing)
+    setStatus('idle', 'No reference solution',
       'This puzzle has no recorded solution; consider it complete.');
     onCorrectFinalMove(userMove);
     return;
   }
 
+  const expectedClean = stripMarks(expectedMove);
   if (userClean === expectedClean) {
     // Correct! If there are more moves, continue; otherwise this is the final.
     const isLast = (expectedIndex >= ml.length - 1);
