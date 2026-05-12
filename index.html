@@ -246,6 +246,35 @@
     .browse label { font-size: 11px; }
     .browse select, .browse input { font-size: 14px; padding: 8px 8px; min-height: 36px; }
     .nav-row { gap: 6px; }
+  
+  .mode-toggle {
+    display: flex;
+    gap: 4px;
+    background: var(--paper-warm);
+    padding: 3px;
+    border: 1px solid var(--paper-edge);
+  }
+  .mode-btn {
+    flex: 1;
+    background: transparent;
+    color: var(--ink-faded);
+    border: 1px solid transparent;
+    padding: 5px 10px;
+    font-size: 13px;
+    box-shadow: none;
+    cursor: pointer;
+  }
+  .mode-btn:hover:not(.mode-btn-active) {
+    color: var(--ink);
+    background: rgba(168, 122, 58, 0.06);
+    transform: none;
+    box-shadow: none;
+  }
+  .mode-btn-active {
+    background: var(--oxblood) !important;
+    color: var(--paper) !important;
+    border-color: var(--oxblood) !important;
+  }
     footer { font-size: 11px; margin-top: 20px; }
   }
 
@@ -1066,6 +1095,12 @@
         <label for="inp-puzzle">Puzzle №</label>
         <input id="inp-puzzle" type="number" min="1" max="5333" value="1">
 
+        <label>Mode</label>
+        <div class="mode-toggle" id="mode-toggle">
+          <button class="mode-btn mode-btn-active" data-mode="sequential" id="mode-sequential">Sequential</button>
+          <button class="mode-btn" data-mode="random" id="mode-random">Random</button>
+        </div>
+
         <div class="nav-row">
           <button id="btn-prev">← Previous</button>
           <button id="btn-random" class="primary">Random</button>
@@ -1135,6 +1170,7 @@ const state = {
   firstAttemptScored: false,
   ui: 'loading',
   filter: '1',
+  navMode: 'sequential',  // 'sequential' or 'random' — affects Next button behavior
   selectedSquare: null,
   legalTargets: null,
   reinforce: null,
@@ -1206,6 +1242,7 @@ const REVIEW_GRADUATION = 2;
 // ============================================================
 const PROFILES_KEY = 'polgar5334:profiles';
 const ACTIVE_KEY = 'polgar5334:activeProfile';
+const NAV_MODE_KEY = 'polgar5334:navMode';
 
 function loadProfiles() {
   try {
@@ -1832,16 +1869,133 @@ function setEditorToStartingPosition() {
 // (Lichess default theme, chess.com green/white). For photos of physical
 // boards, accuracy will be poor — that's why the editor opens for fix-up.
 
-function recognizeBoardFromImage(imgEl) {
-  // Returns { squares: [...64], confidence: 0..1 }, or null on failure.
-  // Simple approach: assume the entire image IS the board (user crops first).
-  // This is the most reliable thing we can promise without ML.
+// ============================================================
+// Image-to-position recognizer (best-effort for screenshots)
+// ============================================================
+
+// Try to find the board's bounding box in the image.
+// Strategy: A chess board has high pixel-variance in a regular pattern.
+//   - Compute per-row variance of pixel brightness (chess board rows alternate dark/light squares, so variance is high)
+//   - Compute per-column variance too
+//   - Find the longest run of consecutive rows/columns with high variance
+//   - That defines a rectangular region; clamp to square (board is square)
+//
+// Returns { x, y, size } (a square region in image pixels), or null if not confident.
+function detectBoardRegion(imgEl) {
+  const W = imgEl.naturalWidth;
+  const H = imgEl.naturalHeight;
+  if (!W || !H) return null;
+
+  // Downsample to a manageable size for speed
+  const targetSize = 256;
+  const scale = Math.min(targetSize / W, targetSize / H, 1);
+  const w = Math.round(W * scale);
+  const h = Math.round(H * scale);
   const canvas = document.createElement('canvas');
-  const size = 512; // standardized work size
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(imgEl, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h).data;
+
+  // Grayscale brightness per pixel
+  const bright = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const p = i * 4;
+    bright[i] = (data[p] + data[p+1] + data[p+2]) / 3;
+  }
+
+  // Row variance: for each row, compute variance of pixel brightness
+  // High variance = lots of contrast (typical for board rows with light/dark squares)
+  // Low variance = uniform area (UI background, empty space)
+  const rowVar = new Float32Array(h);
+  for (let y = 0; y < h; y++) {
+    let sum = 0, sumSq = 0;
+    for (let x = 0; x < w; x++) {
+      const b = bright[y * w + x];
+      sum += b;
+      sumSq += b * b;
+    }
+    const mean = sum / w;
+    rowVar[y] = sumSq / w - mean * mean;
+  }
+  // Column variance
+  const colVar = new Float32Array(w);
+  for (let x = 0; x < w; x++) {
+    let sum = 0, sumSq = 0;
+    for (let y = 0; y < h; y++) {
+      const b = bright[y * w + x];
+      sum += b;
+      sumSq += b * b;
+    }
+    const mean = sum / h;
+    colVar[x] = sumSq / h - mean * mean;
+  }
+
+  // Threshold: rows/columns with variance > some fraction of max are "active"
+  const maxRow = Math.max(...rowVar);
+  const maxCol = Math.max(...colVar);
+  const rowThresh = maxRow * 0.30;
+  const colThresh = maxCol * 0.30;
+
+  // Find longest run of consecutive active rows
+  const findRun = (arr, thresh) => {
+    let bestStart = 0, bestEnd = 0, bestLen = 0;
+    let curStart = -1;
+    for (let i = 0; i <= arr.length; i++) {
+      const active = i < arr.length && arr[i] >= thresh;
+      if (active && curStart < 0) curStart = i;
+      else if (!active && curStart >= 0) {
+        const len = i - curStart;
+        if (len > bestLen) { bestLen = len; bestStart = curStart; bestEnd = i; }
+        curStart = -1;
+      }
+    }
+    return { start: bestStart, end: bestEnd, length: bestLen };
+  };
+
+  const rowRun = findRun(rowVar, rowThresh);
+  const colRun = findRun(colVar, colThresh);
+
+  // Need both runs to be reasonably large
+  if (rowRun.length < h * 0.15 || colRun.length < w * 0.15) return null;
+
+  // Board is square — pick min of the two as side length, center within the larger run
+  const side = Math.min(rowRun.length, colRun.length);
+  // Center each run
+  const cx = (colRun.start + colRun.end) / 2;
+  const cy = (rowRun.start + rowRun.end) / 2;
+  const x0 = Math.max(0, Math.round(cx - side / 2));
+  const y0 = Math.max(0, Math.round(cy - side / 2));
+  const sidePx = Math.min(side, w - x0, h - y0);
+
+  // Confidence heuristic: aspect of the runs should be close to 1:1 (square)
+  const aspectRatio = Math.min(rowRun.length, colRun.length) / Math.max(rowRun.length, colRun.length);
+  if (aspectRatio < 0.7) return null;  // very non-square: probably not a board
+
+  // Scale back to original image coordinates
+  return {
+    x: Math.round(x0 / scale),
+    y: Math.round(y0 / scale),
+    size: Math.round(sidePx / scale),
+  };
+}
+
+function recognizeBoardFromImage(imgEl, region) {
+  // Returns { squares: [...64], confidence: 0..1 }, or null on failure.
+  // `region` is optional: {x, y, size} specifying the board region in image pixels.
+  // If omitted, assumes the entire image IS the board.
+  const W = imgEl.naturalWidth;
+  const H = imgEl.naturalHeight;
+  const r = region || { x: 0, y: 0, size: Math.min(W, H) };
+
+  const canvas = document.createElement('canvas');
+  const size = 512;
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext('2d');
-  ctx.drawImage(imgEl, 0, 0, size, size);
+  // Draw only the board region, scaled to 512x512
+  ctx.drawImage(imgEl, r.x, r.y, r.size, r.size, 0, 0, size, size);
   const cellSize = size / 8;
 
   const squares = new Array(64).fill(null);
@@ -1973,8 +2127,7 @@ function openAddPuzzleModal(existingPuzzle) {
     <!-- TAB 1: From image -->
     <div class="ap-pane ap-pane-active" data-pane="image">
       <p style="color:var(--ink-soft);font-style:italic;font-size:14px;margin:0 0 12px;">
-        Upload a screenshot or photo of the board. <strong>Crop tightly to just the 8×8 board</strong> for best results.
-        The recognizer will detect occupied squares; you'll fill in the piece types in the editor.
+        Upload a screenshot or photo of the board. The app will try to find the 8×8 board automatically — if it gets it wrong, drag the green box to adjust.
       </p>
       <div class="ap-img-drop" id="ap-img-drop">
         <input type="file" id="ap-img-file" accept="image/*" style="display:none;">
@@ -1982,10 +2135,16 @@ function openAddPuzzleModal(existingPuzzle) {
           <div style="font-size:32px;margin-bottom:6px;">📷</div>
           <div>Click to choose an image, or drag-and-drop here</div>
           <div style="font-size:12px;color:var(--ink-faded);margin-top:6px;">
-            Supports PNG, JPG, screenshots, and phone photos
+            Lichess / chess.com screenshots, or phone photos of physical boards
           </div>
         </div>
-        <img id="ap-img-preview" style="display:none;max-width:100%;max-height:280px;">
+        <div id="ap-crop-container" style="display:none; position:relative; max-width:100%; user-select:none;">
+          <img id="ap-img-preview" style="display:block;max-width:100%;max-height:380px;pointer-events:none;">
+          <div id="ap-crop-box" style="position:absolute; border:3px solid #3d6b3a; box-shadow:0 0 0 9999px rgba(28,20,16,0.5); cursor:move; display:none;">
+            <div class="crop-handle crop-handle-br" style="position:absolute; right:-8px; bottom:-8px; width:16px; height:16px; background:#3d6b3a; cursor:nwse-resize;"></div>
+            <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#fff; font-family:'Cormorant Garamond',serif; font-size:14px; text-shadow:0 0 4px rgba(0,0,0,0.8); pointer-events:none;">drag to adjust</div>
+          </div>
+        </div>
       </div>
       <div id="ap-img-status" class="ed-status" style="display:none;"></div>
       <div class="modal-actions" style="border-top:none;padding-top:8px;margin-top:8px;">
@@ -2101,7 +2260,54 @@ function openAddPuzzleModal(existingPuzzle) {
       const imgPreview = $('#ap-img-preview');
       const imgPrompt = $('#ap-img-prompt');
       const imgStatus = $('#ap-img-status');
+      const cropContainer = $('#ap-crop-container');
+      const cropBox = $('#ap-crop-box');
       let loadedImage = null;
+      // Crop state in IMAGE pixel coordinates (not display pixels)
+      let cropRegion = null;  // { x, y, size }
+
+      // Position the on-screen crop box to reflect cropRegion (which is in image-pixel coords)
+      function syncCropBoxToRegion() {
+        if (!loadedImage || !cropRegion) {
+          cropBox.style.display = 'none';
+          return;
+        }
+        const displayW = imgPreview.clientWidth;
+        const displayH = imgPreview.clientHeight;
+        const imgW = loadedImage.naturalWidth;
+        const imgH = loadedImage.naturalHeight;
+        const scale = displayW / imgW;
+        cropBox.style.left = (cropRegion.x * scale) + 'px';
+        cropBox.style.top = (cropRegion.y * scale) + 'px';
+        cropBox.style.width = (cropRegion.size * scale) + 'px';
+        cropBox.style.height = (cropRegion.size * scale) + 'px';
+        cropBox.style.display = 'block';
+      }
+
+      // After image loads, try auto-detect and draw the crop box
+      function afterImageLoaded() {
+        loadedImage = imgPreview;
+        const detected = detectBoardRegion(imgPreview);
+        if (detected) {
+          cropRegion = detected;
+          imgStatus.textContent = '✓ Board found automatically. Drag the green box if it\u2019s not quite right, then click Recognize.';
+          imgStatus.className = 'ed-status ok';
+        } else {
+          // Default to a centered square covering most of the image
+          const imgW = imgPreview.naturalWidth;
+          const imgH = imgPreview.naturalHeight;
+          const side = Math.min(imgW, imgH) * 0.8;
+          cropRegion = {
+            x: Math.round((imgW - side) / 2),
+            y: Math.round((imgH - side) / 2),
+            size: Math.round(side),
+          };
+          imgStatus.textContent = '⚠ Couldn\u2019t auto-detect the board. Drag and resize the green box to cover just the 8×8 board, then click Recognize.';
+          imgStatus.className = 'ed-status warn';
+        }
+        imgStatus.style.display = '';
+        syncCropBoxToRegion();
+      }
 
       const loadImageFile = (file) => {
         if (!file || !file.type.startsWith('image/')) {
@@ -2111,14 +2317,18 @@ function openAddPuzzleModal(existingPuzzle) {
         const reader = new FileReader();
         reader.onload = (ev) => {
           imgPreview.src = ev.target.result;
-          imgPreview.style.display = 'block';
           imgPrompt.style.display = 'none';
-          imgPreview.onload = () => { loadedImage = imgPreview; };
+          cropContainer.style.display = 'block';
+          imgPreview.onload = afterImageLoaded;
         };
         reader.readAsDataURL(file);
       };
 
-      imgDrop.addEventListener('click', () => imgFile.click());
+      imgDrop.addEventListener('click', (e) => {
+        // Don't trigger file picker when clicking the crop box itself
+        if (cropContainer.style.display !== 'none' && cropContainer.contains(e.target)) return;
+        imgFile.click();
+      });
       imgFile.addEventListener('change', (e) => {
         if (e.target.files[0]) loadImageFile(e.target.files[0]);
       });
@@ -2144,12 +2354,96 @@ function openAddPuzzleModal(existingPuzzle) {
         }
       });
 
+      // ===== Crop box: drag to move, drag handle to resize =====
+      let dragMode = null;  // 'move' | 'resize' | null
+      let dragStart = null; // { mouseX, mouseY, cropX, cropY, cropSize, scale }
+
+      function pointerStart(e, mode) {
+        e.preventDefault();
+        e.stopPropagation();
+        const p = e.touches ? e.touches[0] : e;
+        const displayW = imgPreview.clientWidth;
+        const scale = displayW / loadedImage.naturalWidth;
+        dragMode = mode;
+        dragStart = {
+          mouseX: p.clientX,
+          mouseY: p.clientY,
+          cropX: cropRegion.x,
+          cropY: cropRegion.y,
+          cropSize: cropRegion.size,
+          scale,
+        };
+      }
+
+      function pointerMove(e) {
+        if (!dragMode || !dragStart) return;
+        e.preventDefault();
+        const p = e.touches ? e.touches[0] : e;
+        const dxPx = p.clientX - dragStart.mouseX;
+        const dyPx = p.clientY - dragStart.mouseY;
+        // Convert display-pixel deltas back to image-pixel deltas
+        const dxImg = dxPx / dragStart.scale;
+        const dyImg = dyPx / dragStart.scale;
+        const imgW = loadedImage.naturalWidth;
+        const imgH = loadedImage.naturalHeight;
+        if (dragMode === 'move') {
+          let newX = dragStart.cropX + dxImg;
+          let newY = dragStart.cropY + dyImg;
+          newX = Math.max(0, Math.min(imgW - cropRegion.size, newX));
+          newY = Math.max(0, Math.min(imgH - cropRegion.size, newY));
+          cropRegion.x = Math.round(newX);
+          cropRegion.y = Math.round(newY);
+        } else if (dragMode === 'resize') {
+          // Resize keeps top-left corner fixed; new size is determined by drag distance
+          // Use the average of dx and dy to keep square
+          let delta = (dxImg + dyImg) / 2;
+          let newSize = dragStart.cropSize + delta;
+          newSize = Math.max(40, Math.min(
+            imgW - cropRegion.x,
+            imgH - cropRegion.y,
+            newSize
+          ));
+          cropRegion.size = Math.round(newSize);
+        }
+        syncCropBoxToRegion();
+      }
+
+      function pointerEnd() {
+        dragMode = null;
+        dragStart = null;
+      }
+
+      cropBox.addEventListener('mousedown', (e) => {
+        if (e.target.classList.contains('crop-handle')) {
+          pointerStart(e, 'resize');
+        } else {
+          pointerStart(e, 'move');
+        }
+      });
+      cropBox.addEventListener('touchstart', (e) => {
+        if (e.target.classList.contains('crop-handle')) {
+          pointerStart(e, 'resize');
+        } else {
+          pointerStart(e, 'move');
+        }
+      }, { passive: false });
+      document.addEventListener('mousemove', pointerMove);
+      document.addEventListener('touchmove', pointerMove, { passive: false });
+      document.addEventListener('mouseup', pointerEnd);
+      document.addEventListener('touchend', pointerEnd);
+
+      // Resync crop box on window resize / orientation change
+      window.addEventListener('resize', syncCropBoxToRegion);
+
       $('#ap-img-clear').addEventListener('click', () => {
         loadedImage = null;
-        imgPreview.style.display = 'none';
+        cropRegion = null;
+        cropContainer.style.display = 'none';
+        cropBox.style.display = 'none';
         imgPrompt.style.display = '';
         imgFile.value = '';
         imgStatus.style.display = 'none';
+        imgPreview.src = '';
       });
 
       $('#ap-img-recognize').addEventListener('click', () => {
@@ -2157,9 +2451,9 @@ function openAddPuzzleModal(existingPuzzle) {
           alert('Please load an image first.');
           return;
         }
-        const result = recognizeBoardFromImage(loadedImage);
+        const result = recognizeBoardFromImage(loadedImage, cropRegion);
         if (!result || result.confidence < 0.2) {
-          imgStatus.textContent = '⚠ Recognizer had trouble with this image. Switching to the empty editor — you can place the pieces manually.';
+          imgStatus.textContent = '⚠ Recognizer had trouble with this region. Switching to the empty editor — place the pieces manually.';
           imgStatus.className = 'ed-status warn';
           imgStatus.style.display = '';
           editor.squares = new Array(64).fill(null);
@@ -2169,7 +2463,6 @@ function openAddPuzzleModal(existingPuzzle) {
           imgStatus.style.display = '';
           editor.squares = result.squares.slice();
         }
-        // Switch to editor tab
         document.querySelector('.ap-tab[data-tab="editor"]').click();
       });
 
@@ -3637,6 +3930,12 @@ function renderProgressNote() {
 }
 
 function nextPuzzle() {
+  // In Random mode, Next behaves like Random.
+  if (state.navMode === 'random') {
+    randomPuzzle();
+    return;
+  }
+  // Sequential mode: pick the next ID in the practice list (in puzzle-number order).
   const ids = getPracticeIds();
   if (ids.length === 0) {
     showAllDoneNotice();
@@ -3647,6 +3946,11 @@ function nextPuzzle() {
   loadPuzzle(next === undefined ? ids[0] : next);
 }
 function prevPuzzle() {
+  // In Random mode, Previous is meaningless — just pick another random one.
+  if (state.navMode === 'random') {
+    randomPuzzle();
+    return;
+  }
   const ids = getPracticeIds();
   if (ids.length === 0) {
     showAllDoneNotice();
@@ -3786,6 +4090,23 @@ function bindUI() {
   $('#btn-hint').addEventListener('click', showHint);
   $('#btn-solution').addEventListener('click', showSolution);
   $('#btn-reset').addEventListener('click', () => loadPuzzle(state.current.i));
+
+  // Restore saved nav mode (Sequential/Random)
+  try {
+    const saved = localStorage.getItem(NAV_MODE_KEY);
+    if (saved === 'random' || saved === 'sequential') state.navMode = saved;
+  } catch (e) {}
+
+  function setNavMode(mode) {
+    state.navMode = mode;
+    try { localStorage.setItem(NAV_MODE_KEY, mode); } catch (e) {}
+    $('#mode-sequential').classList.toggle('mode-btn-active', mode === 'sequential');
+    $('#mode-random').classList.toggle('mode-btn-active', mode === 'random');
+  }
+  // Apply initial state
+  setNavMode(state.navMode);
+  $('#mode-sequential').addEventListener('click', () => setNavMode('sequential'));
+  $('#mode-random').addEventListener('click', () => setNavMode('random'));
 
   $('#sel-section').addEventListener('change', (e) => {
     state.filter = e.target.value;
