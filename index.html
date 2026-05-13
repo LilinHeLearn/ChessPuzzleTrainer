@@ -1882,12 +1882,19 @@ function setEditorToStartingPosition() {
 //
 // Returns { x, y, size } (a square region in image pixels), or null if not confident.
 function detectBoardRegion(imgEl) {
+  // Better detection: a chess board has a SPECIFIC structure:
+  //   - 8 rows × 8 columns of alternating light/dark squares
+  //   - Each row has 4 dark + 4 light squares in alternating positions
+  //   - The pattern is PERIODIC with period 2 (light, dark, light, dark, ...)
+  //
+  // Strategy: scan candidate square regions; for each, check how "chessboard-like" it is
+  // by measuring how well its pixels match the alternating pattern.
   const W = imgEl.naturalWidth;
   const H = imgEl.naturalHeight;
   if (!W || !H) return null;
 
-  // Downsample to a manageable size for speed
-  const targetSize = 256;
+  // Downsample for speed
+  const targetSize = 320;
   const scale = Math.min(targetSize / W, targetSize / H, 1);
   const w = Math.round(W * scale);
   const h = Math.round(H * scale);
@@ -1897,87 +1904,114 @@ function detectBoardRegion(imgEl) {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(imgEl, 0, 0, w, h);
   const data = ctx.getImageData(0, 0, w, h).data;
-
-  // Grayscale brightness per pixel
   const bright = new Float32Array(w * h);
   for (let i = 0; i < w * h; i++) {
     const p = i * 4;
     bright[i] = (data[p] + data[p+1] + data[p+2]) / 3;
   }
+  const getB = (x, y) => bright[y * w + x];
 
-  // Row variance: for each row, compute variance of pixel brightness
-  // High variance = lots of contrast (typical for board rows with light/dark squares)
-  // Low variance = uniform area (UI background, empty space)
-  const rowVar = new Float32Array(h);
-  for (let y = 0; y < h; y++) {
-    let sum = 0, sumSq = 0;
-    for (let x = 0; x < w; x++) {
-      const b = bright[y * w + x];
-      sum += b;
-      sumSq += b * b;
-    }
-    const mean = sum / w;
-    rowVar[y] = sumSq / w - mean * mean;
-  }
-  // Column variance
-  const colVar = new Float32Array(w);
-  for (let x = 0; x < w; x++) {
-    let sum = 0, sumSq = 0;
-    for (let y = 0; y < h; y++) {
-      const b = bright[y * w + x];
-      sum += b;
-      sumSq += b * b;
-    }
-    const mean = sum / h;
-    colVar[x] = sumSq / h - mean * mean;
-  }
-
-  // Threshold: rows/columns with variance > some fraction of max are "active"
-  const maxRow = Math.max(...rowVar);
-  const maxCol = Math.max(...colVar);
-  const rowThresh = maxRow * 0.30;
-  const colThresh = maxCol * 0.30;
-
-  // Find longest run of consecutive active rows
-  const findRun = (arr, thresh) => {
-    let bestStart = 0, bestEnd = 0, bestLen = 0;
-    let curStart = -1;
-    for (let i = 0; i <= arr.length; i++) {
-      const active = i < arr.length && arr[i] >= thresh;
-      if (active && curStart < 0) curStart = i;
-      else if (!active && curStart >= 0) {
-        const len = i - curStart;
-        if (len > bestLen) { bestLen = len; bestStart = curStart; bestEnd = i; }
-        curStart = -1;
+  // Score a candidate square region (x0, y0, side) for "how chessboard-like is it?"
+  // Sample the center of each of the 8×8 sub-cells; check if the alternating pattern
+  // (light/dark/light/dark…) matches.
+  function scoreRegion(x0, y0, side) {
+    const cellSize = side / 8;
+    if (cellSize < 4) return -1;  // too small to sample reliably
+    const samples = [];  // 64 brightness samples
+    for (let r = 0; r < 8; r++) {
+      for (let f = 0; f < 8; f++) {
+        const cx = Math.floor(x0 + f * cellSize + cellSize / 2);
+        const cy = Math.floor(y0 + r * cellSize + cellSize / 2);
+        if (cx < 0 || cx >= w || cy < 0 || cy >= h) return -1;
+        // Average a 3x3 patch at the cell center (for robustness)
+        let sum = 0, n = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const x = cx + dx, y = cy + dy;
+            if (x >= 0 && x < w && y >= 0 && y < h) {
+              sum += getB(x, y);
+              n++;
+            }
+          }
+        }
+        samples.push({ r, f, brightness: sum / n, isLight: (r + f) % 2 === 0 });
       }
     }
-    return { start: bestStart, end: bestEnd, length: bestLen };
-  };
+    // Compute the average brightness of "should-be-light" and "should-be-dark" cells.
+    // For a chess board, these averages should be very different.
+    let lightSum = 0, lightN = 0, darkSum = 0, darkN = 0;
+    for (const s of samples) {
+      if (s.isLight) { lightSum += s.brightness; lightN++; }
+      else { darkSum += s.brightness; darkN++; }
+    }
+    const lightAvg = lightSum / lightN;
+    const darkAvg = darkSum / darkN;
+    const diff = lightAvg - darkAvg;  // positive if light squares are actually lighter
 
-  const rowRun = findRun(rowVar, rowThresh);
-  const colRun = findRun(colVar, colThresh);
+    // If light squares aren't reliably brighter than dark squares, it's not a board
+    if (diff < 15) return -1;
 
-  // Need both runs to be reasonably large
-  if (rowRun.length < h * 0.15 || colRun.length < w * 0.15) return null;
+    // Count how many cells follow the expected polarity
+    // Median brightness as threshold
+    const allBrights = samples.map(s => s.brightness).sort((a, b) => a - b);
+    const median = allBrights[Math.floor(allBrights.length / 2)];
+    let correct = 0;
+    for (const s of samples) {
+      // A piece may sit on a square and obscure its color, so this isn't 100%.
+      // We just count cells where the polarity matches the alternating pattern.
+      if (s.isLight && s.brightness > median - 10) correct++;
+      else if (!s.isLight && s.brightness < median + 10) correct++;
+    }
+    // Score: weight by both contrast and pattern correctness
+    return (diff / 5) + correct;
+  }
 
-  // Board is square — pick min of the two as side length, center within the larger run
-  const side = Math.min(rowRun.length, colRun.length);
-  // Center each run
-  const cx = (colRun.start + colRun.end) / 2;
-  const cy = (rowRun.start + rowRun.end) / 2;
-  const x0 = Math.max(0, Math.round(cx - side / 2));
-  const y0 = Math.max(0, Math.round(cy - side / 2));
-  const sidePx = Math.min(side, w - x0, h - y0);
+  // Scan candidate regions. Try various sizes and positions.
+  // To keep this fast, use a coarse grid for positions and a few sizes.
+  let best = { score: -1, x: 0, y: 0, size: 0 };
+  const minSide = Math.floor(Math.min(w, h) * 0.30);
+  const maxSide = Math.floor(Math.min(w, h) * 0.95);
+  const numSizes = 8;
+  const step = Math.max(4, Math.floor(Math.min(w, h) / 40));
+  for (let s = 0; s < numSizes; s++) {
+    const side = Math.round(minSide + (maxSide - minSide) * (s / Math.max(1, numSizes - 1)));
+    for (let y0 = 0; y0 + side <= h; y0 += step) {
+      for (let x0 = 0; x0 + side <= w; x0 += step) {
+        const score = scoreRegion(x0, y0, side);
+        if (score > best.score) {
+          best = { score, x: x0, y: y0, size: side };
+        }
+      }
+    }
+  }
 
-  // Confidence heuristic: aspect of the runs should be close to 1:1 (square)
-  const aspectRatio = Math.min(rowRun.length, colRun.length) / Math.max(rowRun.length, colRun.length);
-  if (aspectRatio < 0.7) return null;  // very non-square: probably not a board
+  if (best.score < 20) return null;  // not confident
+
+  // Refine: do a finer search around the best result
+  const refineStep = 2;
+  const range = step;
+  const sizeRange = Math.round(best.size * 0.15);
+  for (let ds = -sizeRange; ds <= sizeRange; ds += refineStep) {
+    const side = best.size + ds;
+    if (side < minSide || side > maxSide) continue;
+    for (let dy = -range; dy <= range; dy += refineStep) {
+      for (let dx = -range; dx <= range; dx += refineStep) {
+        const x0 = best.x + dx;
+        const y0 = best.y + dy;
+        if (x0 < 0 || y0 < 0 || x0 + side > w || y0 + side > h) continue;
+        const score = scoreRegion(x0, y0, side);
+        if (score > best.score) {
+          best = { score, x: x0, y: y0, size: side };
+        }
+      }
+    }
+  }
 
   // Scale back to original image coordinates
   return {
-    x: Math.round(x0 / scale),
-    y: Math.round(y0 / scale),
-    size: Math.round(sidePx / scale),
+    x: Math.round(best.x / scale),
+    y: Math.round(best.y / scale),
+    size: Math.round(best.size / scale),
   };
 }
 
@@ -2453,16 +2487,31 @@ function openAddPuzzleModal(existingPuzzle) {
         }
         const result = recognizeBoardFromImage(loadedImage, cropRegion);
         if (!result || result.confidence < 0.2) {
-          imgStatus.textContent = '⚠ Recognizer had trouble with this region. Switching to the empty editor — place the pieces manually.';
+          // STAY on the image tab so the user can adjust the green box and try again.
+          imgStatus.innerHTML =
+            '⚠ The green box doesn\u2019t look like a chess board. ' +
+            'Drag and resize it so it covers ONLY the 8×8 board (no clocks, names, or buttons), ' +
+            'then click Recognize again. ' +
+            '<br><br>' +
+            '<a href="#" id="ap-skip-recognition" style="color:var(--oxblood);text-decoration:underline;">Or skip and place pieces manually →</a>';
           imgStatus.className = 'ed-status warn';
           imgStatus.style.display = '';
-          editor.squares = new Array(64).fill(null);
-        } else {
-          imgStatus.textContent = `✓ Detected ${result.pieceCount} piece${result.pieceCount === 1 ? '' : 's'}. Now click each one in the editor to set its type.`;
-          imgStatus.className = 'ed-status ok';
-          imgStatus.style.display = '';
-          editor.squares = result.squares.slice();
+          // Wire up the "skip" link
+          setTimeout(() => {
+            const skipLink = $('#ap-skip-recognition');
+            if (skipLink) skipLink.addEventListener('click', (ev) => {
+              ev.preventDefault();
+              editor.squares = new Array(64).fill(null);
+              document.querySelector('.ap-tab[data-tab="editor"]').click();
+            });
+          }, 0);
+          return;
         }
+        // Success — switch to editor
+        imgStatus.textContent = `✓ Detected ${result.pieceCount} piece${result.pieceCount === 1 ? '' : 's'}. Now click each one in the editor to set its type.`;
+        imgStatus.className = 'ed-status ok';
+        imgStatus.style.display = '';
+        editor.squares = result.squares.slice();
         document.querySelector('.ap-tab[data-tab="editor"]').click();
       });
 
