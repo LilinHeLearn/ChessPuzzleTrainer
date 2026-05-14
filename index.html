@@ -2175,8 +2175,11 @@ function openAddPuzzleModal(existingPuzzle) {
         <div id="ap-crop-container" style="display:none; position:relative; max-width:100%; user-select:none;">
           <img id="ap-img-preview" style="display:block;max-width:100%;max-height:380px;pointer-events:none;">
           <div id="ap-crop-box" style="position:absolute; border:3px solid #3d6b3a; box-shadow:0 0 0 9999px rgba(28,20,16,0.5); cursor:move; display:none;">
-            <div class="crop-handle crop-handle-br" style="position:absolute; right:-8px; bottom:-8px; width:16px; height:16px; background:#3d6b3a; cursor:nwse-resize;"></div>
-            <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#fff; font-family:'Cormorant Garamond',serif; font-size:14px; text-shadow:0 0 4px rgba(0,0,0,0.8); pointer-events:none;">drag to adjust</div>
+            <div class="crop-handle crop-handle-tl" style="position:absolute; left:-14px; top:-14px; width:28px; height:28px; background:#3d6b3a; border-radius:50%; cursor:nwse-resize; box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>
+            <div class="crop-handle crop-handle-tr" style="position:absolute; right:-14px; top:-14px; width:28px; height:28px; background:#3d6b3a; border-radius:50%; cursor:nesw-resize; box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>
+            <div class="crop-handle crop-handle-bl" style="position:absolute; left:-14px; bottom:-14px; width:28px; height:28px; background:#3d6b3a; border-radius:50%; cursor:nesw-resize; box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>
+            <div class="crop-handle crop-handle-br" style="position:absolute; right:-14px; bottom:-14px; width:28px; height:28px; background:#3d6b3a; border-radius:50%; cursor:nwse-resize; box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>
+            <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#fff; font-family:'Cormorant Garamond',serif; font-size:13px; text-shadow:0 0 4px rgba(0,0,0,0.8); pointer-events:none; background:rgba(0,0,0,0.3); padding:2px 8px; border-radius:3px;">drag center · corners to resize</div>
           </div>
         </div>
       </div>
@@ -2392,7 +2395,7 @@ function openAddPuzzleModal(existingPuzzle) {
       let dragMode = null;  // 'move' | 'resize' | null
       let dragStart = null; // { mouseX, mouseY, cropX, cropY, cropSize, scale }
 
-      function pointerStart(e, mode) {
+      function pointerStart(e, mode, corner) {
         e.preventDefault();
         e.stopPropagation();
         const p = e.touches ? e.touches[0] : e;
@@ -2406,6 +2409,7 @@ function openAddPuzzleModal(existingPuzzle) {
           cropY: cropRegion.y,
           cropSize: cropRegion.size,
           scale,
+          corner: corner || null,
         };
       }
 
@@ -2428,15 +2432,51 @@ function openAddPuzzleModal(existingPuzzle) {
           cropRegion.x = Math.round(newX);
           cropRegion.y = Math.round(newY);
         } else if (dragMode === 'resize') {
-          // Resize keeps top-left corner fixed; new size is determined by drag distance
-          // Use the average of dx and dy to keep square
-          let delta = (dxImg + dyImg) / 2;
-          let newSize = dragStart.cropSize + delta;
-          newSize = Math.max(40, Math.min(
-            imgW - cropRegion.x,
-            imgH - cropRegion.y,
-            newSize
-          ));
+          // Each corner anchors the OPPOSITE corner in place and resizes from the dragged corner.
+          // Always keep square (use max abs delta).
+          // 'tl' = top-left, 'tr' = top-right, 'bl' = bottom-left, 'br' = bottom-right
+          const corner = dragStart.corner || 'br';
+          // Direction multipliers: how does each corner's drag affect (newX, newY, size)?
+          // dragging br: x/y stay, size += avg(dx, dy)
+          // dragging tl: size -= avg(dx, dy); x += (oldSize-newSize); y += (oldSize-newSize)
+          // dragging tr: x stays; y += dy; size += avg(dx, -dy)... we'll use a cleaner approach
+          //
+          // Compute the anchor corner in image coords, and the dragged corner's current
+          // position based on the mouse. The new size is the max abs of (dx, dy) from anchor.
+          let anchorX, anchorY;
+          if (corner === 'br') { anchorX = dragStart.cropX; anchorY = dragStart.cropY; }
+          else if (corner === 'tl') { anchorX = dragStart.cropX + dragStart.cropSize; anchorY = dragStart.cropY + dragStart.cropSize; }
+          else if (corner === 'tr') { anchorX = dragStart.cropX; anchorY = dragStart.cropY + dragStart.cropSize; }
+          else if (corner === 'bl') { anchorX = dragStart.cropX + dragStart.cropSize; anchorY = dragStart.cropY; }
+
+          // Drag position (in image coords) of the dragged corner
+          let dragX, dragY;
+          if (corner === 'br') { dragX = dragStart.cropX + dragStart.cropSize + dxImg; dragY = dragStart.cropY + dragStart.cropSize + dyImg; }
+          else if (corner === 'tl') { dragX = dragStart.cropX + dxImg; dragY = dragStart.cropY + dyImg; }
+          else if (corner === 'tr') { dragX = dragStart.cropX + dragStart.cropSize + dxImg; dragY = dragStart.cropY + dyImg; }
+          else if (corner === 'bl') { dragX = dragStart.cropX + dxImg; dragY = dragStart.cropY + dragStart.cropSize + dyImg; }
+
+          // Compute new size as the max of |anchor-drag| on either axis (keeps square)
+          const absDx = Math.abs(dragX - anchorX);
+          const absDy = Math.abs(dragY - anchorY);
+          let newSize = Math.max(absDx, absDy);
+          newSize = Math.max(40, newSize);
+          // Determine new x, y based on anchor and which corner is dragged
+          let newX, newY;
+          if (corner === 'br') { newX = anchorX; newY = anchorY; }
+          else if (corner === 'tl') { newX = anchorX - newSize; newY = anchorY - newSize; }
+          else if (corner === 'tr') { newX = anchorX; newY = anchorY - newSize; }
+          else if (corner === 'bl') { newX = anchorX - newSize; newY = anchorY; }
+          // Clamp to image bounds
+          if (newX < 0) { newSize += newX; newX = 0; }
+          if (newY < 0) { newSize += newY; newY = 0; }
+          if (newX + newSize > imgW) newSize = imgW - newX;
+          if (newY + newSize > imgH) newSize = imgH - newY;
+          newSize = Math.max(40, newSize);
+          // Need to keep square — if we clamped one dimension, adjust the other to match
+          // (we use min of available room in each direction)
+          cropRegion.x = Math.round(newX);
+          cropRegion.y = Math.round(newY);
           cropRegion.size = Math.round(newSize);
         }
         syncCropBoxToRegion();
@@ -2447,19 +2487,23 @@ function openAddPuzzleModal(existingPuzzle) {
         dragStart = null;
       }
 
+      function cornerFromElement(el) {
+        if (el.classList.contains('crop-handle-tl')) return 'tl';
+        if (el.classList.contains('crop-handle-tr')) return 'tr';
+        if (el.classList.contains('crop-handle-bl')) return 'bl';
+        if (el.classList.contains('crop-handle-br')) return 'br';
+        return null;
+      }
+
       cropBox.addEventListener('mousedown', (e) => {
-        if (e.target.classList.contains('crop-handle')) {
-          pointerStart(e, 'resize');
-        } else {
-          pointerStart(e, 'move');
-        }
+        const corner = cornerFromElement(e.target);
+        if (corner) pointerStart(e, 'resize', corner);
+        else pointerStart(e, 'move');
       });
       cropBox.addEventListener('touchstart', (e) => {
-        if (e.target.classList.contains('crop-handle')) {
-          pointerStart(e, 'resize');
-        } else {
-          pointerStart(e, 'move');
-        }
+        const corner = cornerFromElement(e.target);
+        if (corner) pointerStart(e, 'resize', corner);
+        else pointerStart(e, 'move');
       }, { passive: false });
       document.addEventListener('mousemove', pointerMove);
       document.addEventListener('touchmove', pointerMove, { passive: false });
