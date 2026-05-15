@@ -1230,6 +1230,7 @@ function emptyProfile(name) {
     bestStreak: 0,
     currentStreak: 0,
     myPuzzles: [],
+    pieceTemplates: {},  // learned templates: { 'K': [gray...], 'q': [gray...], ... } for image recognition
   };
 }
 
@@ -1274,9 +1275,10 @@ function setActiveProfile(name) {
   state.profile = state.profiles[name];
   state.solved = new Set(state.profile.solved);
   state.missed = new Set(state.profile.missed);
-  // Backfill myPuzzles and reviewProgress for older profiles
+  // Backfill myPuzzles, reviewProgress, pieceTemplates for older profiles
   if (!state.profile.myPuzzles) state.profile.myPuzzles = [];
   if (!state.profile.reviewProgress) state.profile.reviewProgress = {};
+  if (!state.profile.pieceTemplates) state.profile.pieceTemplates = {};
   syncMyPuzzlesIntoIndex();
   try { localStorage.setItem(ACTIVE_KEY, name); } catch (e) {}
   renderProfileUI();
@@ -2016,9 +2018,18 @@ function detectBoardRegion(imgEl) {
 }
 
 function recognizeBoardFromImage(imgEl, region) {
-  // Returns { squares: [...64], confidence: 0..1 }, or null on failure.
-  // `region` is optional: {x, y, size} specifying the board region in image pixels.
-  // If omitted, assumes the entire image IS the board.
+  // Detect WHICH squares contain pieces and their color (white/black).
+  // Piece TYPE (K/Q/R/B/N/P) is left for the user to set in the editor.
+  //
+  // Strategy:
+  //   1. For each of 64 squares, compute features from the central region:
+  //      - mean brightness
+  //      - color variance (empty squares are uniform; pieces have varied tones)
+  //      - edge magnitude (gradients — pieces have internal contours)
+  //   2. A square "has a piece" if edge magnitude OR color variance is high.
+  //      This works even when piece brightness matches the square (white on light, black on dark).
+  //   3. Piece color: compare the brightest few pixels to the darkest few in the cell.
+  //      Bright-dominant cell → white piece; dark-dominant → black piece.
   const W = imgEl.naturalWidth;
   const H = imgEl.naturalHeight;
   const r = region || { x: 0, y: 0, size: Math.min(W, H) };
@@ -2028,75 +2039,233 @@ function recognizeBoardFromImage(imgEl, region) {
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext('2d');
-  // Draw only the board region, scaled to 512x512
   ctx.drawImage(imgEl, r.x, r.y, r.size, r.size, 0, 0, size, size);
   const cellSize = size / 8;
 
   const squares = new Array(64).fill(null);
 
-  // For each square, sample center pixels and compare brightness vs the square's
-  // expected light/dark color. A piece is "present" if the center deviates significantly
-  // from the empty-square baseline.
-  // Then, classify piece COLOR by looking at the dominant tone of the piece pixels
-  // (white pieces are brighter than the square they sit on; black pieces darker).
-  // Piece TYPE classification is too hard without ML — we leave that as null
-  // and let the user place pieces in the editor.
-  //
-  // Actually simpler and more honest: just detect WHICH SQUARES HAVE PIECES,
-  // and what color the piece is. Mark them in the editor so user only has to
-  // identify the piece type, not also where pieces are. Saves time.
+  // Pull whole-board pixel data once for edge filter
+  const fullData = ctx.getImageData(0, 0, size, size).data;
+  const gray = new Float32Array(size * size);
+  for (let i = 0; i < size * size; i++) {
+    const p = i * 4;
+    gray[i] = (fullData[p] + fullData[p+1] + fullData[p+2]) / 3;
+  }
 
-  // Compute baseline light/dark cell colors (average of squares we're confident are empty —
-  // hard to know which are empty in advance, so use median across all squares as proxy)
-  const cellAvg = [];
-  for (let r = 0; r < 8; r++) {
-    for (let f = 0; f < 8; f++) {
-      const x0 = Math.floor(f * cellSize + cellSize * 0.1);
-      const y0 = Math.floor(r * cellSize + cellSize * 0.1);
-      const w = Math.floor(cellSize * 0.8);
-      const h = Math.floor(cellSize * 0.8);
-      const data = ctx.getImageData(x0, y0, w, h).data;
-      let sumR = 0, sumG = 0, sumB = 0, n = 0;
-      for (let p = 0; p < data.length; p += 4) {
-        sumR += data[p]; sumG += data[p+1]; sumB += data[p+2];
-        n++;
+  // Helper: per-cell features
+  function cellFeatures(r_idx, f_idx) {
+    // Sample from the central 60% of the cell — avoids edges between cells
+    const x0 = Math.floor(f_idx * cellSize + cellSize * 0.20);
+    const y0 = Math.floor(r_idx * cellSize + cellSize * 0.20);
+    const w = Math.floor(cellSize * 0.60);
+    const h = Math.floor(cellSize * 0.60);
+
+    // Compute mean brightness, brightness variance, and edge magnitude
+    let sumB = 0, sumB2 = 0, nB = 0;
+    const brights = [];
+    let edgeSum = 0, edgeN = 0;
+    for (let yy = y0; yy < y0 + h; yy++) {
+      for (let xx = x0; xx < x0 + w; xx++) {
+        if (xx < 1 || xx >= size - 1 || yy < 1 || yy >= size - 1) continue;
+        const b = gray[yy * size + xx];
+        brights.push(b);
+        sumB += b;
+        sumB2 += b * b;
+        nB++;
+        // Sobel-like gradient magnitude
+        const gx = gray[yy * size + xx + 1] - gray[yy * size + xx - 1];
+        const gy = gray[(yy+1) * size + xx] - gray[(yy-1) * size + xx];
+        edgeSum += Math.sqrt(gx*gx + gy*gy);
+        edgeN++;
       }
-      const isLight = (r + f) % 2 === 0;
-      cellAvg.push({
-        r: sumR / n, g: sumG / n, b: sumB / n,
-        brightness: (sumR + sumG + sumB) / (3 * n),
-        isLight,
-        idx: r * 8 + f,
-      });
+    }
+    const meanB = sumB / nB;
+    const varB = (sumB2 / nB) - meanB * meanB;  // brightness variance
+    const stdB = Math.sqrt(Math.max(0, varB));
+    const edgeMag = edgeSum / edgeN;
+
+    // Sort brightnesses to look at extremes (piece coloring)
+    brights.sort((a, b) => a - b);
+    const p10 = brights[Math.floor(brights.length * 0.10)];   // 10th percentile (darkest)
+    const p90 = brights[Math.floor(brights.length * 0.90)];   // 90th percentile (brightest)
+
+    return { meanB, stdB, edgeMag, p10, p90 };
+  }
+
+  // Compute features for all 64 cells
+  const cells = [];
+  for (let r_idx = 0; r_idx < 8; r_idx++) {
+    for (let f_idx = 0; f_idx < 8; f_idx++) {
+      const f = cellFeatures(r_idx, f_idx);
+      f.r = r_idx;
+      f.f = f_idx;
+      f.isLight = (r_idx + f_idx) % 2 === 0;
+      f.idx = r_idx * 8 + f_idx;
+      cells.push(f);
     }
   }
 
-  // Estimate empty light/dark colors using medians of brightnesses by square color
-  const lightBrights = cellAvg.filter(c => c.isLight).map(c => c.brightness).sort((a,b)=>a-b);
-  const darkBrights  = cellAvg.filter(c => !c.isLight).map(c => c.brightness).sort((a,b)=>a-b);
-  const median = arr => arr[Math.floor(arr.length / 2)];
-  const lightBaseline = median(lightBrights);
-  const darkBaseline = median(darkBrights);
+  // Establish baseline empty-cell features.
+  // Use the cells with the LOWEST edge magnitude as the "definitely empty" reference,
+  // separately for light and dark squares.
+  const lightCells = cells.filter(c => c.isLight).sort((a, b) => a.edgeMag - b.edgeMag);
+  const darkCells  = cells.filter(c => !c.isLight).sort((a, b) => a.edgeMag - b.edgeMag);
+  // Take bottom 25% (= 8 lightest-edge cells in each color) as the empty baseline reference
+  const lightEmpty = lightCells.slice(0, Math.max(2, Math.floor(lightCells.length * 0.25)));
+  const darkEmpty  = darkCells.slice(0, Math.max(2, Math.floor(darkCells.length * 0.25)));
 
-  // For each square, deviation from baseline = piece signal
-  for (const c of cellAvg) {
-    const baseline = c.isLight ? lightBaseline : darkBaseline;
-    const dev = c.brightness - baseline;
-    // Threshold: |dev| > 25 indicates piece present (tunable)
-    if (Math.abs(dev) < 25) {
-      squares[c.idx] = null;  // empty
+  const lightBaselineEdge = lightEmpty.reduce((s,c) => s + c.edgeMag, 0) / lightEmpty.length;
+  const darkBaselineEdge  = darkEmpty.reduce((s,c) => s + c.edgeMag, 0) / darkEmpty.length;
+  const lightBaselineB    = lightEmpty.reduce((s,c) => s + c.meanB, 0) / lightEmpty.length;
+  const darkBaselineB     = darkEmpty.reduce((s,c) => s + c.meanB, 0) / darkEmpty.length;
+
+  // A cell has a piece if EITHER:
+  //   - its edge magnitude is significantly higher than the empty baseline (piece has contours), OR
+  //   - its mean brightness deviates significantly from the empty baseline (piece visibly different)
+  //   - its brightness range (p90 - p10) is large (piece + square = two tones)
+  for (const c of cells) {
+    const baselineEdge = c.isLight ? lightBaselineEdge : darkBaselineEdge;
+    const baselineB    = c.isLight ? lightBaselineB    : darkBaselineB;
+    const edgeRatio = c.edgeMag / Math.max(baselineEdge, 1);
+    const brightDev = Math.abs(c.meanB - baselineB);
+    const range = c.p90 - c.p10;
+
+    // Tunable thresholds, designed to be permissive (better to false-positive a square
+    // than miss a piece — user can clear a cell easier than add one)
+    const hasPiece = (edgeRatio > 2.0) || (brightDev > 18) || (range > 60);
+
+    if (!hasPiece) {
+      squares[c.idx] = null;
     } else {
-      // Color: brighter than baseline → white piece; darker → black piece
-      // We use 'P' / 'p' as placeholder pieces (user picks the actual type in editor)
-      squares[c.idx] = dev > 0 ? '?W' : '?B';  // unknown white / unknown black
+      // Determine piece color.
+      // White piece: many bright pixels even in dark cell, so p90 is very bright
+      // Black piece: many dark pixels even in light cell, so p10 is very dark
+      // Use both p10 and p90 vs baseline
+      const isWhitePiece = c.p90 > Math.max(baselineB + 30, 200);
+      const isBlackPiece = c.p10 < Math.min(baselineB - 30, 80);
+      if (isWhitePiece && !isBlackPiece) {
+        squares[c.idx] = '?W';
+      } else if (isBlackPiece && !isWhitePiece) {
+        squares[c.idx] = '?B';
+      } else {
+        // Ambiguous — pick whichever extreme is more deviating from baseline
+        if (Math.abs(c.p90 - baselineB) > Math.abs(baselineB - c.p10)) {
+          squares[c.idx] = '?W';
+        } else {
+          squares[c.idx] = '?B';
+        }
+      }
     }
   }
 
-  // Count detected pieces — if absurdly low or high, the recognizer probably failed
   const pieceCount = squares.filter(s => s !== null).length;
-  const confidence = (pieceCount >= 3 && pieceCount <= 32) ? 0.6 : 0.1;
-
+  const confidence = (pieceCount >= 3 && pieceCount <= 32) ? 0.7 : 0.1;
   return { squares, confidence, pieceCount };
+}
+
+// ============================================================
+// Template matching: learn piece templates from user-confirmed boards,
+// then use them to identify piece TYPES (K/Q/R/B/N/P) in new images.
+// ============================================================
+const TEMPLATE_SIZE = 48;  // normalize each cell to 48x48 pixels for matching
+
+// Extract a single cell from an image as Uint8ClampedArray of TEMPLATE_SIZE × TEMPLATE_SIZE grayscale
+function extractCellGray(imgEl, region, r_idx, f_idx) {
+  const r = region || { x: 0, y: 0, size: Math.min(imgEl.naturalWidth, imgEl.naturalHeight) };
+  const cellSize = r.size / 8;
+  const cellX = r.x + f_idx * cellSize;
+  const cellY = r.y + r_idx * cellSize;
+  const canvas = document.createElement('canvas');
+  canvas.width = TEMPLATE_SIZE;
+  canvas.height = TEMPLATE_SIZE;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(imgEl, cellX, cellY, cellSize, cellSize, 0, 0, TEMPLATE_SIZE, TEMPLATE_SIZE);
+  const data = ctx.getImageData(0, 0, TEMPLATE_SIZE, TEMPLATE_SIZE).data;
+  // Convert to grayscale Float32 array
+  const gray = new Float32Array(TEMPLATE_SIZE * TEMPLATE_SIZE);
+  for (let i = 0; i < gray.length; i++) {
+    const p = i * 4;
+    gray[i] = (data[p] + data[p+1] + data[p+2]) / 3;
+  }
+  return gray;
+}
+
+// Normalized cross-correlation between two grayscale arrays (same length).
+// Returns a value in [-1, 1]; 1 = identical.
+function ncc(a, b) {
+  let sumA = 0, sumB = 0;
+  for (let i = 0; i < a.length; i++) { sumA += a[i]; sumB += b[i]; }
+  const meanA = sumA / a.length;
+  const meanB = sumB / b.length;
+  let num = 0, denomA = 0, denomB = 0;
+  for (let i = 0; i < a.length; i++) {
+    const da = a[i] - meanA;
+    const db = b[i] - meanB;
+    num += da * db;
+    denomA += da * da;
+    denomB += db * db;
+  }
+  const denom = Math.sqrt(denomA * denomB);
+  return denom > 1e-9 ? num / denom : 0;
+}
+
+// Subtract the cell's background (light/dark square) to isolate the piece itself.
+// This helps match a piece on a light square against the same piece on a dark square.
+function subtractBackground(gray, isLightSquare, lightBaselineB, darkBaselineB) {
+  const bg = isLightSquare ? lightBaselineB : darkBaselineB;
+  const out = new Float32Array(gray.length);
+  for (let i = 0; i < gray.length; i++) {
+    out[i] = gray[i] - bg;
+  }
+  return out;
+}
+
+// Given an image with confirmed piece placements (squares array), save the per-piece templates.
+// Returns an object: { 'K': [gray_array, ...], 'Q': [...], ..., 'p': [...] }
+// Multiple templates per piece allowed (use first one we see).
+function learnTemplatesFromBoard(imgEl, region, squares) {
+  const templates = {};
+  for (let r_idx = 0; r_idx < 8; r_idx++) {
+    for (let f_idx = 0; f_idx < 8; f_idx++) {
+      const idx = r_idx * 8 + f_idx;
+      const piece = squares[idx];
+      if (!piece || piece === '?W' || piece === '?B') continue;
+      // Don't overwrite existing template — first sample wins (could improve with averaging)
+      if (templates[piece]) continue;
+      templates[piece] = Array.from(extractCellGray(imgEl, region, r_idx, f_idx));
+    }
+  }
+  return templates;
+}
+
+// Try to identify piece types using saved templates.
+// Returns a map: { squareIdx: pieceType, ... }, only for cells where NCC > threshold.
+function classifyWithTemplates(imgEl, region, occupiedSquares, templates) {
+  if (!templates || Object.keys(templates).length === 0) return {};
+  const results = {};
+  const matchThreshold = 0.50;  // NCC must exceed this to count as a confident match
+
+  // For each occupied square, find the template with highest NCC
+  for (const sqIdx of occupiedSquares) {
+    const r_idx = Math.floor(sqIdx / 8);
+    const f_idx = sqIdx % 8;
+    const cellGray = extractCellGray(imgEl, region, r_idx, f_idx);
+
+    let bestPiece = null, bestScore = -2;
+    for (const [piece, tmplArr] of Object.entries(templates)) {
+      const tmpl = new Float32Array(tmplArr);
+      const score = ncc(cellGray, tmpl);
+      if (score > bestScore) {
+        bestScore = score;
+        bestPiece = piece;
+      }
+    }
+
+    if (bestScore >= matchThreshold) {
+      results[sqIdx] = bestPiece;
+    }
+  }
+  return results;
 }
 
 // Unknown markers from the recognizer get rendered as faded silhouettes the user clicks to refine
@@ -2504,9 +2673,11 @@ function openAddPuzzleModal(existingPuzzle) {
         const corner = cornerFromElement(handle);
         if (!corner) return;
         handle.addEventListener('mousedown', (e) => {
+          e.stopPropagation();
           pointerStart(e, 'resize', corner);
         });
         handle.addEventListener('touchstart', (e) => {
+          e.stopPropagation();
           pointerStart(e, 'resize', corner);
         }, { passive: false });
       });
@@ -2555,7 +2726,6 @@ function openAddPuzzleModal(existingPuzzle) {
             '<a href="#" id="ap-skip-recognition" style="color:var(--oxblood);text-decoration:underline;">Or skip and place pieces manually →</a>';
           imgStatus.className = 'ed-status warn';
           imgStatus.style.display = '';
-          // Wire up the "skip" link
           setTimeout(() => {
             const skipLink = $('#ap-skip-recognition');
             if (skipLink) skipLink.addEventListener('click', (ev) => {
@@ -2566,8 +2736,36 @@ function openAddPuzzleModal(existingPuzzle) {
           }, 0);
           return;
         }
-        // Success — switch to editor
-        imgStatus.textContent = `✓ Detected ${result.pieceCount} piece${result.pieceCount === 1 ? '' : 's'}. Now click each one in the editor to set its type.`;
+
+        // Detection succeeded. Try to identify piece TYPES using learned templates.
+        let typedCount = 0;
+        const templates = (state.profile && state.profile.pieceTemplates) || {};
+        if (Object.keys(templates).length > 0) {
+          const occupiedSquares = [];
+          for (let i = 0; i < 64; i++) {
+            if (result.squares[i] !== null) occupiedSquares.push(i);
+          }
+          const typeMap = classifyWithTemplates(loadedImage, cropRegion, occupiedSquares, templates);
+          for (const [sqIdx, piece] of Object.entries(typeMap)) {
+            result.squares[parseInt(sqIdx, 10)] = piece;
+            typedCount++;
+          }
+        }
+
+        // Remember image+region for later learning when the user saves the puzzle
+        editor.lastImageEl = loadedImage;
+        editor.lastRegion = cropRegion ? { ...cropRegion } : null;
+
+        // Status message
+        const totalDetected = result.pieceCount;
+        const remaining = totalDetected - typedCount;
+        if (typedCount > 0 && remaining === 0) {
+          imgStatus.textContent = `✓ Detected ${totalDetected} pieces and identified all types using learned templates. Verify in editor.`;
+        } else if (typedCount > 0) {
+          imgStatus.textContent = `✓ Detected ${totalDetected} pieces. Identified ${typedCount} from learned templates; click the remaining ${remaining} to set their types.`;
+        } else {
+          imgStatus.textContent = `✓ Detected ${totalDetected} pieces. Click each one in the editor to set its type. After you save, the app will learn the piece styles for next time.`;
+        }
         imgStatus.className = 'ed-status ok';
         imgStatus.style.display = '';
         editor.squares = result.squares.slice();
@@ -2788,6 +2986,21 @@ function openAddPuzzleModal(existingPuzzle) {
         } else {
           state.profile.myPuzzles.push(puz);
         }
+
+        // Learn piece templates from this confirmed board, if we have a source image
+        if (editor.lastImageEl && editor.squares) {
+          try {
+            const newTemplates = learnTemplatesFromBoard(editor.lastImageEl, editor.lastRegion, editor.squares);
+            if (!state.profile.pieceTemplates) state.profile.pieceTemplates = {};
+            // Merge: existing templates win, new ones fill in gaps
+            for (const [piece, tmpl] of Object.entries(newTemplates)) {
+              if (!state.profile.pieceTemplates[piece]) {
+                state.profile.pieceTemplates[piece] = tmpl;
+              }
+            }
+          } catch (e) { console.error('Template learning failed:', e); }
+        }
+
         saveProgress();
         syncMyPuzzlesIntoIndex();
         closeModal();
