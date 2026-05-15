@@ -2173,12 +2173,12 @@ function openAddPuzzleModal(existingPuzzle) {
           </div>
         </div>
         <div id="ap-crop-container" style="display:none; position:relative; max-width:100%; user-select:none;">
-          <img id="ap-img-preview" style="display:block;max-width:100%;max-height:380px;pointer-events:none;">
-          <div id="ap-crop-box" style="position:absolute; border:3px solid #3d6b3a; box-shadow:0 0 0 9999px rgba(28,20,16,0.5); cursor:move; display:none;">
-            <div class="crop-handle crop-handle-tl" style="position:absolute; left:-14px; top:-14px; width:28px; height:28px; background:#3d6b3a; border-radius:50%; cursor:nwse-resize; box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>
-            <div class="crop-handle crop-handle-tr" style="position:absolute; right:-14px; top:-14px; width:28px; height:28px; background:#3d6b3a; border-radius:50%; cursor:nesw-resize; box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>
-            <div class="crop-handle crop-handle-bl" style="position:absolute; left:-14px; bottom:-14px; width:28px; height:28px; background:#3d6b3a; border-radius:50%; cursor:nesw-resize; box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>
-            <div class="crop-handle crop-handle-br" style="position:absolute; right:-14px; bottom:-14px; width:28px; height:28px; background:#3d6b3a; border-radius:50%; cursor:nwse-resize; box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>
+          <img id="ap-img-preview" style="display:block;max-width:100%;max-height:380px;pointer-events:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;">
+          <div id="ap-crop-box" style="position:absolute; border:3px solid #3d6b3a; box-shadow:0 0 0 9999px rgba(28,20,16,0.5); cursor:move; display:none; touch-action:none; -webkit-touch-callout:none; -webkit-user-select:none; user-select:none;">
+            <div class="crop-handle crop-handle-tl" style="position:absolute; left:-14px; top:-14px; width:28px; height:28px; background:#3d6b3a; border-radius:50%; cursor:nwse-resize; box-shadow:0 1px 4px rgba(0,0,0,0.4); touch-action:none;"></div>
+            <div class="crop-handle crop-handle-tr" style="position:absolute; right:-14px; top:-14px; width:28px; height:28px; background:#3d6b3a; border-radius:50%; cursor:nesw-resize; box-shadow:0 1px 4px rgba(0,0,0,0.4); touch-action:none;"></div>
+            <div class="crop-handle crop-handle-bl" style="position:absolute; left:-14px; bottom:-14px; width:28px; height:28px; background:#3d6b3a; border-radius:50%; cursor:nesw-resize; box-shadow:0 1px 4px rgba(0,0,0,0.4); touch-action:none;"></div>
+            <div class="crop-handle crop-handle-br" style="position:absolute; right:-14px; bottom:-14px; width:28px; height:28px; background:#3d6b3a; border-radius:50%; cursor:nwse-resize; box-shadow:0 1px 4px rgba(0,0,0,0.4); touch-action:none;"></div>
             <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#fff; font-family:'Cormorant Garamond',serif; font-size:13px; text-shadow:0 0 4px rgba(0,0,0,0.8); pointer-events:none; background:rgba(0,0,0,0.3); padding:2px 8px; border-radius:3px;">drag center · corners to resize</div>
           </div>
         </div>
@@ -2495,15 +2495,30 @@ function openAddPuzzleModal(existingPuzzle) {
         return null;
       }
 
+      // Bind resize handlers DIRECTLY to each corner handle. We don't rely on event
+      // delegation through cropBox, because on iOS Safari `e.target` can sometimes
+      // resolve to the parent instead of the actual touched child element, which
+      // would cause the handle's touch to be treated as a body-touch (= move).
+      const cornerHandles = cropBox.querySelectorAll('.crop-handle');
+      cornerHandles.forEach(handle => {
+        const corner = cornerFromElement(handle);
+        if (!corner) return;
+        handle.addEventListener('mousedown', (e) => {
+          pointerStart(e, 'resize', corner);
+        });
+        handle.addEventListener('touchstart', (e) => {
+          pointerStart(e, 'resize', corner);
+        }, { passive: false });
+      });
+
+      // Center of cropBox = move (only fires when click/touch isn't on a handle)
       cropBox.addEventListener('mousedown', (e) => {
-        const corner = cornerFromElement(e.target);
-        if (corner) pointerStart(e, 'resize', corner);
-        else pointerStart(e, 'move');
+        if (cornerFromElement(e.target)) return;  // handle takes precedence
+        pointerStart(e, 'move');
       });
       cropBox.addEventListener('touchstart', (e) => {
-        const corner = cornerFromElement(e.target);
-        if (corner) pointerStart(e, 'resize', corner);
-        else pointerStart(e, 'move');
+        if (cornerFromElement(e.target)) return;
+        pointerStart(e, 'move');
       }, { passive: false });
       document.addEventListener('mousemove', pointerMove);
       document.addEventListener('touchmove', pointerMove, { passive: false });
