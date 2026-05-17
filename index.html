@@ -2119,10 +2119,11 @@ function recognizeBoardFromImage(imgEl, region) {
   const lightBaselineB    = lightEmpty.reduce((s,c) => s + c.meanB, 0) / lightEmpty.length;
   const darkBaselineB     = darkEmpty.reduce((s,c) => s + c.meanB, 0) / darkEmpty.length;
 
-  // A cell has a piece if EITHER:
-  //   - its edge magnitude is significantly higher than the empty baseline (piece has contours), OR
-  //   - its mean brightness deviates significantly from the empty baseline (piece visibly different)
-  //   - its brightness range (p90 - p10) is large (piece + square = two tones)
+  // A cell has a piece if:
+  //   - its edge magnitude is significantly higher than the empty baseline (piece has internal contours), AND
+  //   - at least one secondary feature (brightness deviation OR range) is somewhat elevated
+  // We require the edge signal because empty highlighted squares (yellow last-move highlight)
+  // can have high brightness deviation and range, but they're still uniform → low edge magnitude.
   for (const c of cells) {
     const baselineEdge = c.isLight ? lightBaselineEdge : darkBaselineEdge;
     const baselineB    = c.isLight ? lightBaselineB    : darkBaselineB;
@@ -2130,17 +2131,20 @@ function recognizeBoardFromImage(imgEl, region) {
     const brightDev = Math.abs(c.meanB - baselineB);
     const range = c.p90 - c.p10;
 
-    // Tunable thresholds, designed to be permissive (better to false-positive a square
-    // than miss a piece — user can clear a cell easier than add one)
-    const hasPiece = (edgeRatio > 2.0) || (brightDev > 18) || (range > 60);
+    // Primary criterion: edge magnitude clearly elevated above empty baseline
+    // (an empty square has no internal contours, even when highlighted)
+    const hasEdges = edgeRatio > 2.5;
+    // Strong secondary signal: very bright extreme (white piece) OR very dark extreme (black piece)
+    // — must be more extreme than what a highlighted empty cell would produce
+    const hasExtremes = (c.p90 > 220 && !c.isLight) ||      // bright spot on dark square
+                       (c.p10 < 70 && c.isLight) ||         // dark spot on light square
+                       (range > 100);                       // large internal range
+    const hasPiece = hasEdges && hasExtremes;
 
     if (!hasPiece) {
       squares[c.idx] = null;
     } else {
-      // Determine piece color.
-      // White piece: many bright pixels even in dark cell, so p90 is very bright
-      // Black piece: many dark pixels even in light cell, so p10 is very dark
-      // Use both p10 and p90 vs baseline
+      // Piece color: look at extremes vs baseline
       const isWhitePiece = c.p90 > Math.max(baselineB + 30, 200);
       const isBlackPiece = c.p10 < Math.min(baselineB - 30, 80);
       if (isWhitePiece && !isBlackPiece) {
@@ -2148,7 +2152,6 @@ function recognizeBoardFromImage(imgEl, region) {
       } else if (isBlackPiece && !isWhitePiece) {
         squares[c.idx] = '?B';
       } else {
-        // Ambiguous — pick whichever extreme is more deviating from baseline
         if (Math.abs(c.p90 - baselineB) > Math.abs(baselineB - c.p10)) {
           squares[c.idx] = '?W';
         } else {
@@ -2168,6 +2171,82 @@ function recognizeBoardFromImage(imgEl, region) {
 // then use them to identify piece TYPES (K/Q/R/B/N/P) in new images.
 // ============================================================
 const TEMPLATE_SIZE = 48;  // normalize each cell to 48x48 pixels for matching
+
+// Built-in templates: load Wikipedia chess pieces from chessboard.js CDN.
+// These are based on the Cburnett SVG set which closely resembles chess.com Classic.
+// Templates render on demand and are cached in this in-memory map.
+const BUILTIN_PIECE_URLS = {
+  'K': 'https://chessboardjs.com/img/chesspieces/wikipedia/wK.png',
+  'Q': 'https://chessboardjs.com/img/chesspieces/wikipedia/wQ.png',
+  'R': 'https://chessboardjs.com/img/chesspieces/wikipedia/wR.png',
+  'B': 'https://chessboardjs.com/img/chesspieces/wikipedia/wB.png',
+  'N': 'https://chessboardjs.com/img/chesspieces/wikipedia/wN.png',
+  'P': 'https://chessboardjs.com/img/chesspieces/wikipedia/wP.png',
+  'k': 'https://chessboardjs.com/img/chesspieces/wikipedia/bK.png',
+  'q': 'https://chessboardjs.com/img/chesspieces/wikipedia/bQ.png',
+  'r': 'https://chessboardjs.com/img/chesspieces/wikipedia/bR.png',
+  'b': 'https://chessboardjs.com/img/chesspieces/wikipedia/bB.png',
+  'n': 'https://chessboardjs.com/img/chesspieces/wikipedia/bN.png',
+  'p': 'https://chessboardjs.com/img/chesspieces/wikipedia/bP.png',
+};
+
+// Cache for built-in templates (rendered grayscale arrays)
+let _builtinTemplates = null;
+
+// Render a single piece PNG into a grayscale TEMPLATE_SIZE × TEMPLATE_SIZE array.
+// Composites against a colored background to match what the piece looks like on a real board.
+function renderBuiltinTemplate(url, bgColor) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = TEMPLATE_SIZE;
+      canvas.height = TEMPLATE_SIZE;
+      const ctx = canvas.getContext('2d');
+      // Fill with the background color (representing a board square)
+      ctx.fillStyle = bgColor;
+      ctx.fillRect(0, 0, TEMPLATE_SIZE, TEMPLATE_SIZE);
+      // Draw the piece centered, filling most of the cell
+      const inset = TEMPLATE_SIZE * 0.08;
+      ctx.drawImage(img, inset, inset, TEMPLATE_SIZE - 2*inset, TEMPLATE_SIZE - 2*inset);
+      const data = ctx.getImageData(0, 0, TEMPLATE_SIZE, TEMPLATE_SIZE).data;
+      const gray = new Float32Array(TEMPLATE_SIZE * TEMPLATE_SIZE);
+      for (let i = 0; i < gray.length; i++) {
+        const p = i * 4;
+        gray[i] = (data[p] + data[p+1] + data[p+2]) / 3;
+      }
+      resolve(Array.from(gray));
+    };
+    img.onerror = () => reject(new Error('Failed to load ' + url));
+    img.src = url;
+  });
+}
+
+// Build the full set of built-in templates (one per piece type).
+// Renders each piece on a NEUTRAL gray background — since matching subtracts background
+// implicitly via NCC, the exact bg doesn't matter much; we use mid-gray as a compromise.
+async function getBuiltinTemplates() {
+  if (_builtinTemplates) return _builtinTemplates;
+  const templates = {};
+  const bg = '#999999';  // mid-gray, neutral between light and dark squares
+  for (const [piece, url] of Object.entries(BUILTIN_PIECE_URLS)) {
+    try {
+      templates[piece] = await renderBuiltinTemplate(url, bg);
+    } catch (e) {
+      console.warn('Failed to load template for', piece, e);
+    }
+  }
+  _builtinTemplates = templates;
+  return templates;
+}
+
+// Try to preload templates in the background after page load, so they're ready when needed.
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    getBuiltinTemplates().catch(e => console.warn('Template preload failed:', e));
+  }, 1500);
+});
 
 // Extract a single cell from an image as Uint8ClampedArray of TEMPLATE_SIZE × TEMPLATE_SIZE grayscale
 function extractCellGray(imgEl, region, r_idx, f_idx) {
@@ -2710,14 +2789,20 @@ function openAddPuzzleModal(existingPuzzle) {
         imgPreview.src = '';
       });
 
-      $('#ap-img-recognize').addEventListener('click', () => {
+      $('#ap-img-recognize').addEventListener('click', async () => {
         if (!loadedImage) {
           alert('Please load an image first.');
           return;
         }
+        const recognizeBtn = $('#ap-img-recognize');
+        recognizeBtn.disabled = true;
+        const origText = recognizeBtn.textContent;
+        recognizeBtn.textContent = 'Recognizing…';
+
         const result = recognizeBoardFromImage(loadedImage, cropRegion);
         if (!result || result.confidence < 0.2) {
-          // STAY on the image tab so the user can adjust the green box and try again.
+          recognizeBtn.disabled = false;
+          recognizeBtn.textContent = origText;
           imgStatus.innerHTML =
             '⚠ The green box doesn\u2019t look like a chess board. ' +
             'Drag and resize it so it covers ONLY the 8×8 board (no clocks, names, or buttons), ' +
@@ -2737,15 +2822,26 @@ function openAddPuzzleModal(existingPuzzle) {
           return;
         }
 
-        // Detection succeeded. Try to identify piece TYPES using learned templates.
+        // Detection succeeded. Identify piece TYPES using templates.
+        // Strategy: use learned (user-specific) templates first, fall back to built-in
+        // Wikipedia/Cburnett templates for piece types the user hasn't taught yet.
+        const occupiedSquares = [];
+        for (let i = 0; i < 64; i++) {
+          if (result.squares[i] !== null) occupiedSquares.push(i);
+        }
+
+        const learnedTemplates = (state.profile && state.profile.pieceTemplates) || {};
+        let builtinTemplates = {};
+        try {
+          builtinTemplates = await getBuiltinTemplates();
+        } catch (e) { console.warn('No built-in templates:', e); }
+
+        // Merge: learned takes precedence over built-in
+        const allTemplates = { ...builtinTemplates, ...learnedTemplates };
+
         let typedCount = 0;
-        const templates = (state.profile && state.profile.pieceTemplates) || {};
-        if (Object.keys(templates).length > 0) {
-          const occupiedSquares = [];
-          for (let i = 0; i < 64; i++) {
-            if (result.squares[i] !== null) occupiedSquares.push(i);
-          }
-          const typeMap = classifyWithTemplates(loadedImage, cropRegion, occupiedSquares, templates);
+        if (Object.keys(allTemplates).length > 0) {
+          const typeMap = classifyWithTemplates(loadedImage, cropRegion, occupiedSquares, allTemplates);
           for (const [sqIdx, piece] of Object.entries(typeMap)) {
             result.squares[parseInt(sqIdx, 10)] = piece;
             typedCount++;
@@ -2759,16 +2855,19 @@ function openAddPuzzleModal(existingPuzzle) {
         // Status message
         const totalDetected = result.pieceCount;
         const remaining = totalDetected - typedCount;
+        const hasLearned = Object.keys(learnedTemplates).length > 0;
         if (typedCount > 0 && remaining === 0) {
-          imgStatus.textContent = `✓ Detected ${totalDetected} pieces and identified all types using learned templates. Verify in editor.`;
+          imgStatus.textContent = `✓ Detected ${totalDetected} pieces and identified all types automatically. Verify in editor.`;
         } else if (typedCount > 0) {
-          imgStatus.textContent = `✓ Detected ${totalDetected} pieces. Identified ${typedCount} from learned templates; click the remaining ${remaining} to set their types.`;
+          imgStatus.textContent = `✓ Detected ${totalDetected} pieces. Identified ${typedCount} types automatically; click the remaining ${remaining} to set their types.`;
         } else {
-          imgStatus.textContent = `✓ Detected ${totalDetected} pieces. Click each one in the editor to set its type. After you save, the app will learn the piece styles for next time.`;
+          imgStatus.textContent = `✓ Detected ${totalDetected} pieces. Click each to set its type${hasLearned ? '' : '. After you save, the app will learn the piece styles for next time'}.`;
         }
         imgStatus.className = 'ed-status ok';
         imgStatus.style.display = '';
         editor.squares = result.squares.slice();
+        recognizeBtn.disabled = false;
+        recognizeBtn.textContent = origText;
         document.querySelector('.ap-tab[data-tab="editor"]').click();
       });
 
