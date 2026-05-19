@@ -2017,6 +2017,167 @@ function detectBoardRegion(imgEl) {
   };
 }
 
+// ============================================================
+// OpenCV.js: on-demand loader (only when user opens the From-image tab)
+// ============================================================
+const OPENCV_URL = 'https://docs.opencv.org/4.10.0/opencv.js';
+let _cvLoadState = 'idle';  // 'idle' | 'loading' | 'ready' | 'failed'
+let _cvLoadPromise = null;
+let _cvProgressCb = null;
+
+function loadOpenCV(progressCb) {
+  if (_cvLoadState === 'ready') return Promise.resolve();
+  if (_cvLoadState === 'loading') {
+    _cvProgressCb = progressCb;
+    return _cvLoadPromise;
+  }
+  _cvLoadState = 'loading';
+  _cvProgressCb = progressCb;
+  _cvLoadPromise = new Promise((resolve, reject) => {
+    // Set up the cv-runtime ready callback BEFORE loading the script
+    window.Module = {
+      onRuntimeInitialized: () => {
+        _cvLoadState = 'ready';
+        if (_cvProgressCb) _cvProgressCb({ status: 'ready' });
+        resolve();
+      },
+    };
+    if (_cvProgressCb) _cvProgressCb({ status: 'downloading', percent: 0 });
+
+    const script = document.createElement('script');
+    script.src = OPENCV_URL;
+    script.async = true;
+    script.onload = () => {
+      if (_cvProgressCb) _cvProgressCb({ status: 'initializing' });
+    };
+    script.onerror = () => {
+      _cvLoadState = 'failed';
+      if (_cvProgressCb) _cvProgressCb({ status: 'failed' });
+      reject(new Error('Failed to download OpenCV.js — check your network'));
+    };
+    document.head.appendChild(script);
+  });
+  return _cvLoadPromise;
+}
+
+// ============================================================
+// OpenCV-based board detection: find 9 horizontal + 9 vertical lines
+// using Hough Line Transform, get the 8×8 grid intersections.
+// ============================================================
+function detectBoardWithOpenCV(imgEl) {
+  if (typeof cv === 'undefined' || _cvLoadState !== 'ready') return null;
+
+  // Read image into OpenCV Mat
+  const src = cv.imread(imgEl);
+  const W = src.cols, H = src.rows;
+
+  // Downsample for speed
+  const targetSize = 800;
+  const scale = Math.min(targetSize / W, targetSize / H, 1);
+  const w = Math.round(W * scale);
+  const h = Math.round(H * scale);
+  const small = new cv.Mat();
+  cv.resize(src, small, new cv.Size(w, h));
+
+  // Convert to grayscale and apply edge detection
+  const gray = new cv.Mat();
+  cv.cvtColor(small, gray, cv.COLOR_RGBA2GRAY);
+  const edges = new cv.Mat();
+  cv.Canny(gray, edges, 50, 150);
+
+  // Find lines using Hough transform
+  const lines = new cv.Mat();
+  cv.HoughLines(edges, lines, 1, Math.PI / 180, Math.min(w, h) / 4);
+
+  // Separate into nearly-horizontal and nearly-vertical
+  const horiz = [];   // rho values for horizontal lines (angle ~ pi/2)
+  const vert = [];    // rho values for vertical lines (angle ~ 0 or pi)
+  for (let i = 0; i < lines.rows; i++) {
+    const rho = lines.data32F[i * 2];
+    const theta = lines.data32F[i * 2 + 1];
+    // Normalize: vertical lines have theta close to 0 or pi; horizontal close to pi/2
+    if (Math.abs(theta) < 0.1 || Math.abs(theta - Math.PI) < 0.1) {
+      vert.push(Math.abs(rho));
+    } else if (Math.abs(theta - Math.PI/2) < 0.1) {
+      horiz.push(rho);
+    }
+  }
+
+  // Cluster: many lines on/near each grid line get merged
+  const cluster = (arr, tol) => {
+    if (arr.length === 0) return [];
+    arr.sort((a, b) => a - b);
+    const clusters = [[arr[0]]];
+    for (let i = 1; i < arr.length; i++) {
+      if (arr[i] - clusters[clusters.length - 1][0] < tol) {
+        clusters[clusters.length - 1].push(arr[i]);
+      } else {
+        clusters.push([arr[i]]);
+      }
+    }
+    return clusters.map(c => c.reduce((s, v) => s + v, 0) / c.length);
+  };
+
+  const minDim = Math.min(w, h);
+  const tol = minDim * 0.02;  // 2% of smaller dimension
+  const vClusters = cluster(vert, tol);
+  const hClusters = cluster(horiz, tol);
+
+  let region = null;
+  // We need at least 9 lines in each direction (8 squares + boundaries) for a clean grid.
+  // In practice we may get 5-9; we'll find the most evenly-spaced consecutive set.
+  if (vClusters.length >= 6 && hClusters.length >= 6) {
+    // Find the most evenly-spaced sequence of 9 (or as close as we have)
+    const findGrid = (clusters) => {
+      // For each pair of "start" and "end" candidates, check if intermediate
+      // clusters fall on a regular grid
+      let best = { score: -1, start: 0, end: 0, count: 0 };
+      for (let i = 0; i < clusters.length; i++) {
+        for (let j = i + 7; j < clusters.length; j++) {  // need at least 8 spans
+          const span = clusters[j] - clusters[i];
+          const expectedStep = span / (j - i);
+          // Score: how regular are intermediate cluster positions?
+          let regularity = 0, count = 0;
+          for (let k = i; k <= j; k++) {
+            const expected = clusters[i] + (k - i) * expectedStep;
+            const actual = clusters[k];
+            const err = Math.abs(actual - expected) / expectedStep;
+            regularity += (1 - Math.min(err, 1));
+            count++;
+          }
+          if (regularity > best.score) {
+            best = { score: regularity, start: clusters[i], end: clusters[j], count: count };
+          }
+        }
+      }
+      return best;
+    };
+    const vGrid = findGrid(vClusters);
+    const hGrid = findGrid(hClusters);
+
+    if (vGrid.count >= 5 && hGrid.count >= 5) {
+      // Compute board bounding region in downsampled coords, then scale back
+      const x0 = vGrid.start;
+      const y0 = hGrid.start;
+      const sideX = vGrid.end - vGrid.start;
+      const sideY = hGrid.end - hGrid.start;
+      // Scale to span the full 8×8 (we may have found fewer than 9 lines)
+      const expectedSideX = sideX * 8 / Math.max(1, vGrid.count - 1);
+      const expectedSideY = sideY * 8 / Math.max(1, hGrid.count - 1);
+      const size = Math.max(expectedSideX, expectedSideY);
+      // Use the larger of the two estimates (board is square)
+      region = {
+        x: Math.round(x0 / scale),
+        y: Math.round(y0 / scale),
+        size: Math.round(size / scale),
+      };
+    }
+  }
+
+  src.delete(); small.delete(); gray.delete(); edges.delete(); lines.delete();
+  return region;
+}
+
 function recognizeBoardFromImage(imgEl, region) {
   // Detect WHICH squares contain pieces and their color (white/black).
   // Piece TYPE (K/Q/R/B/N/P) is left for the user to set in the editor.
@@ -2401,16 +2562,17 @@ function openAddPuzzleModal(existingPuzzle) {
 
   openModal(isEdit ? 'Edit puzzle' : 'Add a new puzzle',
     `<div class="ap-tabs">
-      <button class="ap-tab ap-tab-active" data-tab="image">📷 From image</button>
-      <button class="ap-tab" data-tab="editor">✏️ Board editor</button>
+      <button class="ap-tab ap-tab-active" data-tab="editor">✏️ Board editor</button>
       <button class="ap-tab" data-tab="fen">⌨ From FEN</button>
+      <button class="ap-tab" data-tab="image">📷 From image (beta)</button>
     </div>
 
     <!-- TAB 1: From image -->
-    <div class="ap-pane ap-pane-active" data-pane="image">
-      <p style="color:var(--ink-soft);font-style:italic;font-size:14px;margin:0 0 12px;">
-        Upload a screenshot or photo of the board. The app will try to find the 8×8 board automatically — if it gets it wrong, drag the green box to adjust.
+    <div class="ap-pane" data-pane="image">
+      <p style="color:var(--ink-soft);font-style:italic;font-size:14px;margin:0 0 8px;">
+        Upload a screenshot or photo of the board. The app uses computer vision to find the 8×8 board automatically — if it gets it wrong, drag the green box to adjust.
       </p>
+      <div id="ap-cv-status" style="display:none;"></div>
       <div class="ap-img-drop" id="ap-img-drop">
         <input type="file" id="ap-img-file" accept="image/*" style="display:none;">
         <div id="ap-img-prompt">
@@ -2439,7 +2601,7 @@ function openAddPuzzleModal(existingPuzzle) {
     </div>
 
     <!-- TAB 2: Board editor -->
-    <div class="ap-pane" data-pane="editor">
+    <div class="ap-pane ap-pane-active" data-pane="editor">
       <p style="color:var(--ink-soft);font-style:italic;font-size:14px;margin:0 0 8px;">
         Click a piece below, then click squares to place. Click an occupied square with the same piece to remove it.
       </p>
@@ -2536,8 +2698,43 @@ function openAddPuzzleModal(existingPuzzle) {
             renderEditorBoardWithUnknowns('ed-board-mount');
             updateEdSideButtons();
           }
+          // When switching to image tab, kick off OpenCV download (async, non-blocking)
+          if (tab.dataset.tab === 'image') {
+            triggerOpenCVLoad();
+          }
         });
       });
+
+      // Updates the image tab's CV status banner
+      function triggerOpenCVLoad() {
+        const banner = $('#ap-cv-status');
+        if (!banner) return;
+        if (_cvLoadState === 'ready') {
+          banner.style.display = 'none';
+          return;
+        }
+        if (_cvLoadState === 'failed') {
+          banner.textContent = '⚠ OpenCV download failed — using fallback detection (less accurate).';
+          banner.className = 'ed-status warn';
+          banner.style.display = '';
+          return;
+        }
+        banner.textContent = '⏳ Loading OpenCV vision library (~6MB, only needed once — browser caches it)…';
+        banner.className = 'ed-status';
+        banner.style.cssText = 'background:#f7eed8; color:#5a4a30; border:1px solid #d8c8a4; padding:6px 8px; border-radius:4px; font-size:13px; margin:6px 0; display:block;';
+        loadOpenCV((info) => {
+          if (info.status === 'ready') {
+            banner.textContent = '✓ Vision library ready. Upload an image to detect the board precisely.';
+            banner.style.cssText = 'background:#e8efe0; color:#3d6b3a; border:1px solid #9bbf8a; padding:6px 8px; border-radius:4px; font-size:13px; margin:6px 0; display:block;';
+            setTimeout(() => { banner.style.display = 'none'; }, 3000);
+          } else if (info.status === 'initializing') {
+            banner.textContent = '⚙ Initializing OpenCV runtime (a few seconds)…';
+          } else if (info.status === 'failed') {
+            banner.textContent = '⚠ OpenCV failed to load. Using fallback detection — may be less accurate.';
+            banner.style.cssText = 'background:#f5e0db; color:#6b1d1d; border:1px solid #d8a4a4; padding:6px 8px; border-radius:4px; font-size:13px; margin:6px 0; display:block;';
+          }
+        }).catch(() => {});
+      }
 
       // ===== Image tab =====
       const imgDrop = $('#ap-img-drop');
@@ -2572,10 +2769,19 @@ function openAddPuzzleModal(existingPuzzle) {
       // After image loads, try auto-detect and draw the crop box
       function afterImageLoaded() {
         loadedImage = imgPreview;
-        const detected = detectBoardRegion(imgPreview);
+        // Prefer OpenCV-based detection if available (more accurate);
+        // fall back to the heuristic detector otherwise.
+        let detected = null;
+        if (_cvLoadState === 'ready') {
+          try { detected = detectBoardWithOpenCV(imgPreview); }
+          catch (e) { console.warn('OpenCV detection error:', e); }
+        }
+        if (!detected) detected = detectBoardRegion(imgPreview);
+
         if (detected) {
           cropRegion = detected;
-          imgStatus.textContent = '✓ Board found automatically. Drag the green box if it\u2019s not quite right, then click Recognize.';
+          const method = _cvLoadState === 'ready' ? ' (OpenCV)' : '';
+          imgStatus.textContent = '✓ Board found automatically' + method + '. Drag the green box if it\u2019s not quite right, then click Recognize.';
           imgStatus.className = 'ed-status ok';
         } else {
           // Default to a centered square covering most of the image
