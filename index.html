@@ -1024,7 +1024,7 @@
 <header class="title">
   <div class="super">László Polgár · The Universal Encyclopedia of Chess</div>
   <h1>5334<span class="num"> · </span>Problems &amp; Combinations</h1>
-  <div class="sub">A puzzle trainer with engine verification</div>
+  <div class="sub">A puzzle trainer with engine verification · <span style="font-weight:bold;color:#41633d">V4</span></div>
 </header>
 
 <div class="main">
@@ -2791,6 +2791,7 @@ function openAddPuzzleModal(existingPuzzle) {
       <div class="modal-actions" style="border-top:none;padding-top:8px;margin-top:8px;">
         <button class="subtle" id="ap-img-clear">Clear image</button>
         <button class="primary" id="ap-img-recognize">Recognize → editor</button>
+        <span style="font-size:12px;color:#41633d;font-weight:bold;align-self:center" id="recognition-build">Recognition V4 · auto-align</span>
       </div>
     </div>
 
@@ -3201,6 +3202,27 @@ function openAddPuzzleModal(existingPuzzle) {
         const origText = recognizeBtn.textContent;
         recognizeBtn.textContent = 'Recognizing…';
 
+        // Recognition V4: normalize the crop to the actual Chess.com green grid.
+        // Even a 2-pixel crop shift badly degrades 48x48 piece templates.
+        // Preserve genuinely different user-selected regions (photos / other boards).
+        let cropWasCorrected = false;
+        try {
+          const calibrated = detectChessComGreenBoard(loadedImage);
+          if (calibrated && cropRegion) {
+            const tolerance = calibrated.size * 0.085;
+            const nearby = Math.abs(cropRegion.x - calibrated.x) <= tolerance &&
+                           Math.abs(cropRegion.y - calibrated.y) <= tolerance &&
+                           Math.abs(cropRegion.size - calibrated.size) <= tolerance;
+            if (nearby) {
+              cropWasCorrected = Math.abs(cropRegion.x - calibrated.x) > 0.4 ||
+                                 Math.abs(cropRegion.y - calibrated.y) > 0.4 ||
+                                 Math.abs(cropRegion.size - calibrated.size) > 0.4;
+              cropRegion = calibrated;
+              syncCropBoxToRegion();
+            }
+          }
+        } catch (e) { console.warn('Grid re-alignment skipped:', e); }
+
         let result;
         try { result = recognizeBoardFromImage(loadedImage, cropRegion); }
         catch (e) {
@@ -3280,10 +3302,11 @@ function openAddPuzzleModal(existingPuzzle) {
         const totalDetected = result.pieceCount;
         const remaining = totalDetected - typedCount;
         const hasLearned = Object.keys(learnedTemplates).length > 0;
+        const alignNote = cropWasCorrected ? ' Board crop auto-aligned.' : '';
         if (typedCount > 0 && remaining === 0) {
-          imgStatus.textContent = `✓ Detected ${totalDetected} pieces and identified all types automatically. Verify in editor.`;
+          imgStatus.textContent = `✓ Detected ${totalDetected} pieces and identified all types automatically.${alignNote} Verify in editor.`;
         } else if (typedCount > 0) {
-          imgStatus.textContent = `✓ Detected ${totalDetected} pieces. Identified ${typedCount} types automatically; click the remaining ${remaining} to set their types.`;
+          imgStatus.textContent = `✓ Detected ${totalDetected} pieces. Identified ${typedCount} types automatically.${alignNote} Click the remaining ${remaining} to set their types.`;
         } else {
           imgStatus.textContent = `✓ Detected ${totalDetected} pieces. Click each to set its type${hasLearned ? '' : '. After you save, the app will learn the piece styles for next time'}.`;
         }
@@ -5102,4 +5125,5 @@ window.addEventListener('DOMContentLoaded', init);
 </script>
 </body>
 </html>
+
 
