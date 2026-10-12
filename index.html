@@ -2580,6 +2580,37 @@ function chessComGreenBoardStyle(imgEl,region){
   }
   return green>=12;
 }
+// Mask out the distinctive green move-arrow overlay used by Chess.com.
+// A translucent arrow can obscure a rook/king enough that ordinary silhouette
+// matching fails even though occupancy and piece colour are detected correctly.
+// Only use this as a fallback; normal unoccluded recognition is unchanged.
+function chessComMaskedNcc(a,b,valid) {
+  let sumA=0,sumB=0,n=0;
+  for(let i=0;i<a.length;i++) if(valid[i]){sumA+=a[i];sumB+=b[i];n++;}
+  if(n<Math.round(a.length*0.52))return -2;
+  const meanA=sumA/n,meanB=sumB/n;
+  let num=0,denA=0,denB=0;
+  for(let i=0;i<a.length;i++) if(valid[i]){
+    const da=a[i]-meanA,db=b[i]-meanB;
+    num+=da*db;denA+=da*da;denB+=db*db;
+  }
+  return denA>0&&denB>0 ? num/Math.sqrt(denA*denB) : -2;
+}
+function chessComVisiblePixelMask(imgEl,region,row,col){
+  const square=region.size/8,canvas=document.createElement('canvas');
+  canvas.width=48;canvas.height=48;
+  const ctx=canvas.getContext('2d',{willReadFrequently:true});
+  ctx.drawImage(imgEl,region.x+col*square,region.y+row*square,square,square,0,0,48,48);
+  const rgba=ctx.getImageData(0,0,48,48).data;
+  const valid=new Uint8Array(48*48);
+  for(let i=0;i<valid.length;i++){
+    const p=i*4,r=rgba[p],g=rgba[p+1],b=rgba[p+2];
+    // Strong green regions include the board background and move arrows.
+    // Ignore them for partial shape matching, including green-tinted piece pixels.
+    valid[i]=!(g>r+18 && g>b+25 && r>b+5)?1:0;
+  }
+  return valid;
+}
 function classifyChessComClassic(imgEl,region,occupiedSquares,colorHints){
   if(!region || !chessComGreenBoardStyle(imgEl,region))return {};
   const templates=chessComMasks(),result={};
@@ -2588,15 +2619,27 @@ function classifyChessComClassic(imgEl,region,occupiedSquares,colorHints){
     const a=chessComCellMask(imgEl,region,row,col);
     let bestName=null,best=-2,second=-2;
     const side=colorHints[index];
-    for(const [name,template] of Object.entries(templates)){
-      if(side==='?W' && name!==name.toUpperCase())continue;
-      if(side==='?B' && name!==name.toLowerCase())continue;
+    const permitted=Object.entries(templates).filter(([name])=>
+      side==='?W'?name===name.toUpperCase():side==='?B'?name===name.toLowerCase():true
+    );
+    for(const [name,template] of permitted){
       const score=ncc(a,template);
       if(score>best){second=best;best=score;bestName=name;}
       else if(score>second)second=score;
     }
-    // Refuse to guess if the screenshot uses a different set of piece artwork.
-    if(best>=0.74 && best-second>=0.045)result[index]=bestName;
+    if(best>=0.74 && best-second>=0.045){result[index]=bestName;continue;}
+
+    // The ordinary score is ambiguous, so retry using the portion of each
+    // piece that is visible beneath the green move-arrow overlay. Require
+    // strong absolute confidence AND separation from the second-best type.
+    const valid=chessComVisiblePixelMask(imgEl,region,row,col);
+    let fallbackName=null,fallback=-2,runnerUp=-2;
+    for(const [name,template] of permitted){
+      const score=chessComMaskedNcc(a,template,valid);
+      if(score>fallback){runnerUp=fallback;fallback=score;fallbackName=name;}
+      else if(score>runnerUp)runnerUp=score;
+    }
+    if(fallback>=0.79 && fallback-runnerUp>=0.052)result[index]=fallbackName;
   }
   return result;
 }
@@ -5059,3 +5102,4 @@ window.addEventListener('DOMContentLoaded', init);
 </script>
 </body>
 </html>
+
