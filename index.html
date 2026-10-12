@@ -1883,6 +1883,61 @@ function setEditorToStartingPosition() {
 //   - That defines a rectangular region; clamp to square (board is square)
 //
 // Returns { x, y, size } (a square region in image pixels), or null if not confident.
+
+// Chess.com green-board detection: unlike Hough line fitting, this is not
+// confused by the pieces or by yellow last-move highlights. The sample colors
+// are estimated from the screenshot; the board itself remains user-editable.
+function isChessComGreen(r,g,b) {
+  return g > r + 10 && g > b + 25 && r > b + 9 && r >= 60 && r <= 195;
+}
+function detectChessComGreenBoard(imgEl) {
+  const W=imgEl.naturalWidth, H=imgEl.naturalHeight;
+  if (!W || !H) return null;
+  const scale=Math.min(400/W,400/H,1);
+  const w=Math.max(1,Math.round(W*scale)), h=Math.max(1,Math.round(H*scale));
+  const can=document.createElement('canvas');can.width=w;can.height=h;
+  const ct=can.getContext('2d',{willReadFrequently:true});
+  ct.drawImage(imgEl,0,0,w,h);
+  const px=ct.getImageData(0,0,w,h).data;
+  const cols=new Uint32Array(w),rows=new Uint32Array(h);
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++) {
+    const i=(y*w+x)*4;
+    if(isChessComGreen(px[i],px[i+1],px[i+2])) {cols[x]++;rows[y]++;}
+  }
+  const maxCol=Math.max(...cols),maxRow=Math.max(...rows);
+  if(maxCol<15 || maxRow<15)return null;
+  function extent(hist,maxCount){
+    // Use a threshold relative to the busiest board column/row; unlike a
+    // percentage of screenshot height this works in full-page screenshots.
+    const threshold=Math.max(4,Math.floor(maxCount*0.32));
+    let first=-1,last=-1;
+    for(let i=0;i<hist.length;i++)if(hist[i]>=threshold){if(first<0)first=i;last=i;}
+    return first>=0?[first,last+1]:null;
+  }
+  const ex=extent(cols,maxCol),ey=extent(rows,maxRow);
+  if(!ex||!ey)return null;
+  const width=ex[1]-ex[0],height=ey[1]-ey[0];
+  if(Math.min(width,height)<65 || Math.abs(width-height)>Math.max(width,height)*0.09) return null;
+  const s=(width+height)/2;
+  const x=ex[0]+(width-s)/2, y=ey[0]+(height-s)/2;
+  // Confirm a checkerboard, not just an unrelated green rectangle.
+  let correct=0;
+  for(let row=0;row<8;row++)for(let col=0;col<8;col++){
+    let greenVotes=0;
+    for(const cy of [0.18,0.82])for(const cx of [0.18,0.82]){
+      const xx=Math.floor(x+s*(col+cx)/8),yy=Math.floor(y+s*(row+cy)/8);
+      if(xx>=0&&xx<w&&yy>=0&&yy<h){
+        const i=(yy*w+xx)*4;
+        if(isChessComGreen(px[i],px[i+1],px[i+2]))greenVotes++;
+      }
+    }
+    const expected=(row+col)%2===1;
+    if((greenVotes>=2)===expected)correct++;
+  }
+  if(correct<49)return null;
+  return {x:Math.round(x/scale),y:Math.round(y/scale),size:Math.round(s/scale)};
+}
+
 function detectBoardRegion(imgEl) {
   // Better detection: a chess board has a SPECIFIC structure:
   //   - 8 rows × 8 columns of alternating light/dark squares
@@ -1971,10 +2026,10 @@ function detectBoardRegion(imgEl) {
   // Scan candidate regions. Try various sizes and positions.
   // To keep this fast, use a coarse grid for positions and a few sizes.
   let best = { score: -1, x: 0, y: 0, size: 0 };
-  const minSide = Math.floor(Math.min(w, h) * 0.30);
+  const minSide = Math.floor(Math.min(w, h) * 0.12); // allow boards in full-page screenshots
   const maxSide = Math.floor(Math.min(w, h) * 0.95);
-  const numSizes = 8;
-  const step = Math.max(4, Math.floor(Math.min(w, h) / 40));
+  const numSizes = 18;
+  const step = Math.max(3, Math.floor(Math.min(w, h) / 65));
   for (let s = 0; s < numSizes; s++) {
     const side = Math.round(minSide + (maxSide - minSide) * (s / Math.max(1, numSizes - 1)));
     for (let y0 = 0; y0 + side <= h; y0 += step) {
@@ -1990,7 +2045,7 @@ function detectBoardRegion(imgEl) {
   if (best.score < 20) return null;  // not confident
 
   // Refine: do a finer search around the best result
-  const refineStep = 2;
+  const refineStep = 1;
   const range = step;
   const sizeRange = Math.round(best.size * 0.15);
   for (let ds = -sizeRange; ds <= sizeRange; ds += refineStep) {
@@ -2008,6 +2063,46 @@ function detectBoardRegion(imgEl) {
       }
     }
   }
+
+  // Snap the crop to actual 8x8 square boundaries. The earlier checker
+  // test samples cell CENTERS and can accept crops shifted by several pixels.
+  // This step scores the light/dark transitions along all 7 inner gridlines.
+  const edgeAlignment = (x0, y0, side) => {
+    const cell=side/8;
+    if (x0 < 1 || y0 < 1 || x0+side >= w-1 || y0+side >= h-1) return -1;
+    let total=0;
+    for(let i=1;i<8;i++) {
+      const xx=Math.round(x0+i*cell);
+      const yy=Math.round(y0+i*cell);
+      for(let j=0;j<8;j++) {
+        const cy=Math.round(y0+(j+0.5)*cell);
+        const cx=Math.round(x0+(j+0.5)*cell);
+        total += Math.abs(getB(xx-1,cy)-getB(xx+1,cy));
+        total += Math.abs(getB(cx,yy-1)-getB(cx,yy+1));
+      }
+    }
+    return total/112;
+  };
+  let aligned={...best}, alignedScore=-Infinity;
+  const snapRange=Math.max(step*4,Math.round(best.size*0.045));
+  const snapSizes=Math.max(5,Math.round(best.size*0.055));
+  for(let ds=-snapSizes;ds<=snapSizes;ds++) {
+    const side=best.size+ds;
+    if (side<minSide || side>maxSide) continue;
+    for(let dy=-snapRange;dy<=snapRange;dy++) {
+      for(let dx=-snapRange;dx<=snapRange;dx++) {
+        const x0=best.x+dx, y0=best.y+dy;
+        const pattern=scoreRegion(x0,y0,side);
+        if(pattern < best.score - 15) continue;
+        const score=edgeAlignment(x0,y0,side) + 0.12*pattern;
+        if(score > alignedScore) {
+          alignedScore=score;
+          aligned={score:pattern,x:x0,y:y0,size:side};
+        }
+      }
+    }
+  }
+  if (alignedScore > -Infinity) best=aligned;
 
   // Scale back to original image coordinates
   return {
@@ -2037,9 +2132,11 @@ function loadOpenCV(progressCb) {
     // Set up the cv-runtime ready callback BEFORE loading the script
     window.Module = {
       onRuntimeInitialized: () => {
-        _cvLoadState = 'ready';
-        if (_cvProgressCb) _cvProgressCb({ status: 'ready' });
-        resolve();
+        if (_cvLoadState === 'loading') {
+          _cvLoadState = 'ready';
+          if (_cvProgressCb) _cvProgressCb({ status: 'ready' });
+          resolve();
+        }
       },
     };
     if (_cvProgressCb) _cvProgressCb({ status: 'downloading', percent: 0 });
@@ -2047,8 +2144,25 @@ function loadOpenCV(progressCb) {
     const script = document.createElement('script');
     script.src = OPENCV_URL;
     script.async = true;
-    script.onload = () => {
+    script.onload = async () => {
       if (_cvProgressCb) _cvProgressCb({ status: 'initializing' });
+      // OpenCV 4.x distributions differ: some call Module.onRuntimeInitialized,
+      // others expose a Promise in window.cv. Support both.
+      try {
+        if (window.cv && typeof window.cv.then === 'function') {
+          window.cv = await window.cv;
+        }
+        if (window.cv && typeof window.cv.Mat === 'function') {
+          if (_cvLoadState !== 'ready') {
+            _cvLoadState = 'ready';
+            if (_cvProgressCb) _cvProgressCb({status:'ready'});
+            resolve();
+          }
+        }
+      } catch (err) {
+        _cvLoadState = 'failed';
+        reject(err);
+      }
     };
     script.onerror = () => {
       _cvLoadState = 'failed';
@@ -2056,6 +2170,13 @@ function loadOpenCV(progressCb) {
       reject(new Error('Failed to download OpenCV.js — check your network'));
     };
     document.head.appendChild(script);
+    setTimeout(() => {
+      if (_cvLoadState === 'loading') {
+        _cvLoadState = 'failed';
+        if (_cvProgressCb) _cvProgressCb({status:'failed'});
+        reject(new Error('OpenCV did not finish initializing'));
+      }
+    }, 20000);
   });
   return _cvLoadPromise;
 }
@@ -2126,7 +2247,7 @@ function detectBoardWithOpenCV(imgEl) {
   let region = null;
   // We need at least 9 lines in each direction (8 squares + boundaries) for a clean grid.
   // In practice we may get 5-9; we'll find the most evenly-spaced consecutive set.
-  if (vClusters.length >= 6 && hClusters.length >= 6) {
+  if (vClusters.length >= 8 && hClusters.length >= 8) {
     // Find the most evenly-spaced sequence of 9 (or as close as we have)
     const findGrid = (clusters) => {
       // For each pair of "start" and "end" candidates, check if intermediate
@@ -2179,152 +2300,82 @@ function detectBoardWithOpenCV(imgEl) {
 }
 
 function recognizeBoardFromImage(imgEl, region) {
-  // Detect WHICH squares contain pieces and their color (white/black).
-  // Piece TYPE (K/Q/R/B/N/P) is left for the user to set in the editor.
-  //
-  // Strategy:
-  //   1. For each of 64 squares, compute features from the central region:
-  //      - mean brightness
-  //      - color variance (empty squares are uniform; pieces have varied tones)
-  //      - edge magnitude (gradients — pieces have internal contours)
-  //   2. A square "has a piece" if edge magnitude OR color variance is high.
-  //      This works even when piece brightness matches the square (white on light, black on dark).
-  //   3. Piece color: compare the brightest few pixels to the darkest few in the cell.
-  //      Bright-dominant cell → white piece; dark-dominant → black piece.
-  const W = imgEl.naturalWidth;
-  const H = imgEl.naturalHeight;
-  const r = region || { x: 0, y: 0, size: Math.min(W, H) };
-
+  // Each square has a nearly uniform background in a digital screenshot.
+  // Compare central pixels to the ACTUAL square color sampled at its corners.
+  // This detects both light-on-light and dark-on-dark pieces more reliably
+  // than using fixed grayscale thresholds (70/220).
+  const W = imgEl.naturalWidth, H = imgEl.naturalHeight;
+  const r = region || {x:0, y:0, size:Math.min(W,H)};
+  if (!r || r.size <= 0 || r.x < 0 || r.y < 0 ||
+      r.x + r.size > W + 1 || r.y + r.size > H + 1) return null;
+  const size = 512, cellSize = size / 8;
   const canvas = document.createElement('canvas');
-  const size = 512;
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d', {willReadFrequently:true});
   ctx.drawImage(imgEl, r.x, r.y, r.size, r.size, 0, 0, size, size);
-  const cellSize = size / 8;
-
+  const rgba = ctx.getImageData(0, 0, size, size).data;
   const squares = new Array(64).fill(null);
-
-  // Pull whole-board pixel data once for edge filter
-  const fullData = ctx.getImageData(0, 0, size, size).data;
-  const gray = new Float32Array(size * size);
-  for (let i = 0; i < size * size; i++) {
-    const p = i * 4;
-    gray[i] = (fullData[p] + fullData[p+1] + fullData[p+2]) / 3;
-  }
-
-  // Helper: per-cell features
-  function cellFeatures(r_idx, f_idx) {
-    // Sample from the central 60% of the cell — avoids edges between cells
-    const x0 = Math.floor(f_idx * cellSize + cellSize * 0.20);
-    const y0 = Math.floor(r_idx * cellSize + cellSize * 0.20);
-    const w = Math.floor(cellSize * 0.60);
-    const h = Math.floor(cellSize * 0.60);
-
-    // Compute mean brightness, brightness variance, and edge magnitude
-    let sumB = 0, sumB2 = 0, nB = 0;
-    const brights = [];
-    let edgeSum = 0, edgeN = 0;
-    for (let yy = y0; yy < y0 + h; yy++) {
-      for (let xx = x0; xx < x0 + w; xx++) {
-        if (xx < 1 || xx >= size - 1 || yy < 1 || yy >= size - 1) continue;
-        const b = gray[yy * size + xx];
-        brights.push(b);
-        sumB += b;
-        sumB2 += b * b;
-        nB++;
-        // Sobel-like gradient magnitude
-        const gx = gray[yy * size + xx + 1] - gray[yy * size + xx - 1];
-        const gy = gray[(yy+1) * size + xx] - gray[(yy-1) * size + xx];
-        edgeSum += Math.sqrt(gx*gx + gy*gy);
-        edgeN++;
-      }
-    }
-    const meanB = sumB / nB;
-    const varB = (sumB2 / nB) - meanB * meanB;  // brightness variance
-    const stdB = Math.sqrt(Math.max(0, varB));
-    const edgeMag = edgeSum / edgeN;
-
-    // Sort brightnesses to look at extremes (piece coloring)
-    brights.sort((a, b) => a - b);
-    const p10 = brights[Math.floor(brights.length * 0.10)];   // 10th percentile (darkest)
-    const p90 = brights[Math.floor(brights.length * 0.90)];   // 90th percentile (brightest)
-
-    return { meanB, stdB, edgeMag, p10, p90 };
-  }
-
-  // Compute features for all 64 cells
-  const cells = [];
-  for (let r_idx = 0; r_idx < 8; r_idx++) {
-    for (let f_idx = 0; f_idx < 8; f_idx++) {
-      const f = cellFeatures(r_idx, f_idx);
-      f.r = r_idx;
-      f.f = f_idx;
-      f.isLight = (r_idx + f_idx) % 2 === 0;
-      f.idx = r_idx * 8 + f_idx;
-      cells.push(f);
-    }
-  }
-
-  // Establish baseline empty-cell features.
-  // Use the cells with the LOWEST edge magnitude as the "definitely empty" reference,
-  // separately for light and dark squares.
-  const lightCells = cells.filter(c => c.isLight).sort((a, b) => a.edgeMag - b.edgeMag);
-  const darkCells  = cells.filter(c => !c.isLight).sort((a, b) => a.edgeMag - b.edgeMag);
-  // Take bottom 25% (= 8 lightest-edge cells in each color) as the empty baseline reference
-  const lightEmpty = lightCells.slice(0, Math.max(2, Math.floor(lightCells.length * 0.25)));
-  const darkEmpty  = darkCells.slice(0, Math.max(2, Math.floor(darkCells.length * 0.25)));
-
-  const lightBaselineEdge = lightEmpty.reduce((s,c) => s + c.edgeMag, 0) / lightEmpty.length;
-  const darkBaselineEdge  = darkEmpty.reduce((s,c) => s + c.edgeMag, 0) / darkEmpty.length;
-  const lightBaselineB    = lightEmpty.reduce((s,c) => s + c.meanB, 0) / lightEmpty.length;
-  const darkBaselineB     = darkEmpty.reduce((s,c) => s + c.meanB, 0) / darkEmpty.length;
-
-  // A cell has a piece if:
-  //   - its edge magnitude is significantly higher than the empty baseline (piece has internal contours), AND
-  //   - at least one secondary feature (brightness deviation OR range) is somewhat elevated
-  // We require the edge signal because empty highlighted squares (yellow last-move highlight)
-  // can have high brightness deviation and range, but they're still uniform → low edge magnitude.
-  for (const c of cells) {
-    const baselineEdge = c.isLight ? lightBaselineEdge : darkBaselineEdge;
-    const baselineB    = c.isLight ? lightBaselineB    : darkBaselineB;
-    const edgeRatio = c.edgeMag / Math.max(baselineEdge, 1);
-    const brightDev = Math.abs(c.meanB - baselineB);
-    const range = c.p90 - c.p10;
-
-    // Primary criterion: edge magnitude clearly elevated above empty baseline
-    // (an empty square has no internal contours, even when highlighted)
-    const hasEdges = edgeRatio > 2.5;
-    // Strong secondary signal: very bright extreme (white piece) OR very dark extreme (black piece)
-    // — must be more extreme than what a highlighted empty cell would produce
-    const hasExtremes = (c.p90 > 220 && !c.isLight) ||      // bright spot on dark square
-                       (c.p10 < 70 && c.isLight) ||         // dark spot on light square
-                       (range > 100);                       // large internal range
-    const hasPiece = hasEdges && hasExtremes;
-
-    if (!hasPiece) {
-      squares[c.idx] = null;
-    } else {
-      // Piece color: look at extremes vs baseline
-      const isWhitePiece = c.p90 > Math.max(baselineB + 30, 200);
-      const isBlackPiece = c.p10 < Math.min(baselineB - 30, 80);
-      if (isWhitePiece && !isBlackPiece) {
-        squares[c.idx] = '?W';
-      } else if (isBlackPiece && !isWhitePiece) {
-        squares[c.idx] = '?B';
-      } else {
-        if (Math.abs(c.p90 - baselineB) > Math.abs(baselineB - c.p10)) {
-          squares[c.idx] = '?W';
-        } else {
-          squares[c.idx] = '?B';
+  const pixelAt = (x,y) => {
+    const k = (Math.floor(y)*size+Math.floor(x))*4;
+    return [rgba[k], rgba[k+1], rgba[k+2]];
+  };
+  let pieceCount = 0;
+  for (let rr = 0; rr < 8; rr++) {
+    for (let ff = 0; ff < 8; ff++) {
+      const x0 = ff * cellSize, y0 = rr * cellSize;
+      // Estimate the local square background from four near-corner patches.
+      // Taking the median also makes the estimate tolerant of coordinate labels.
+      const cornerR = [[],[],[]];
+      for (const xx of [0.11,0.89]) for (const yy of [0.11,0.89]) {
+        for (let dx=-2; dx<=2; dx++) for (let dy=-2; dy<=2; dy++) {
+          const color = pixelAt(x0 + cellSize*xx+dx, y0+cellSize*yy+dy);
+          for (let k=0;k<3;k++) cornerR[k].push(color[k]);
         }
       }
+      const bg = cornerR.map(v=>{v.sort((a,b)=>a-b); return v[Math.floor(v.length/2)];});
+      const bgGray = (bg[0]+bg[1]+bg[2])/3;
+      let changed = 0, lightInk = 0, darkInk = 0;
+      let edgeSum = 0, samples = 0;
+      // Keep away from cell borders, which often have grids/coordinates.
+      for (let y=y0+cellSize*0.16; y<y0+cellSize*0.84; y+=2) {
+        for (let x=x0+cellSize*0.16; x<x0+cellSize*0.84; x+=2) {
+          const xi=Math.floor(x), yi=Math.floor(y);
+          const [red,green,blue] = pixelAt(xi,yi);
+          const d0=red-bg[0], d1=green-bg[1], d2=blue-bg[2];
+          const difference2=d0*d0+d1*d1+d2*d2;
+          const gray=(red+green+blue)/3;
+          samples++;
+          if (difference2 > 36*36) {
+            changed++;
+            if (gray-bgGray > 9) lightInk++;
+            if (bgGray-gray > 16) darkInk++;
+          }
+          const p=(yi*size+xi)*4;
+          const q=p+8, t=p+size*8;
+          edgeSum += Math.abs(rgba[p]-rgba[q]) +
+                     Math.abs(rgba[p+1]-rgba[q+1]) +
+                     Math.abs(rgba[p+2]-rgba[q+2]) +
+                     Math.abs(rgba[p]-rgba[t]) +
+                     Math.abs(rgba[p+1]-rgba[t+1]) +
+                     Math.abs(rgba[p+2]-rgba[t+2]);
+        }
+      }
+      const changedRatio = changed / samples;
+      const edgeMagnitude = edgeSum / samples;
+      // A graphical chess piece should occupy a meaningful fraction of the
+      // central square, and produce contours; a plain highlight has neither.
+      const hasPiece = changedRatio > 0.065 && edgeMagnitude > 10;
+      if (hasPiece) {
+        const totalInk = lightInk+darkInk;
+        const isWhite = totalInk ? (lightInk / totalInk > 0.35) : bgGray < 160;
+        squares[rr*8+ff] = isWhite ? '?W' : '?B';
+        pieceCount++;
+      }
     }
   }
-
-  const pieceCount = squares.filter(s => s !== null).length;
-  const confidence = (pieceCount >= 3 && pieceCount <= 32) ? 0.7 : 0.1;
-  return { squares, confidence, pieceCount };
+  // 2 kings minimum, 32 pieces maximum for an ordinary chess position.
+  const confidence = pieceCount >= 2 && pieceCount <= 32 ? 0.7 : 0.1;
+  return {squares, pieceCount, confidence};
 }
 
 // ============================================================
@@ -2360,7 +2411,9 @@ function renderBuiltinTemplate(url, bgColor) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
+    const timeout = setTimeout(() => reject(new Error('Piece image download timed out: ' + url)), 8000);
     img.onload = () => {
+      try {
       const canvas = document.createElement('canvas');
       canvas.width = TEMPLATE_SIZE;
       canvas.height = TEMPLATE_SIZE;
@@ -2377,9 +2430,11 @@ function renderBuiltinTemplate(url, bgColor) {
         const p = i * 4;
         gray[i] = (data[p] + data[p+1] + data[p+2]) / 3;
       }
+      clearTimeout(timeout);
       resolve(Array.from(gray));
+      } catch (err) { clearTimeout(timeout); reject(err); }
     };
-    img.onerror = () => reject(new Error('Failed to load ' + url));
+    img.onerror = () => { clearTimeout(timeout); reject(new Error('Failed to load ' + url)); };
     img.src = url;
   });
 }
@@ -2389,15 +2444,14 @@ function renderBuiltinTemplate(url, bgColor) {
 // implicitly via NCC, the exact bg doesn't matter much; we use mid-gray as a compromise.
 async function getBuiltinTemplates() {
   if (_builtinTemplates) return _builtinTemplates;
+  // Fetch in parallel; failure of one remote icon must never block recognition.
+  const entries = Object.entries(BUILTIN_PIECE_URLS);
+  const outcomes = await Promise.all(entries.map(async ([piece,url]) => {
+    try { return [piece,await renderBuiltinTemplate(url, '#999999')]; }
+    catch (err) { console.warn('Piece reference unavailable',piece,err); return null; }
+  }));
   const templates = {};
-  const bg = '#999999';  // mid-gray, neutral between light and dark squares
-  for (const [piece, url] of Object.entries(BUILTIN_PIECE_URLS)) {
-    try {
-      templates[piece] = await renderBuiltinTemplate(url, bg);
-    } catch (e) {
-      console.warn('Failed to load template for', piece, e);
-    }
-  }
+  for (const item of outcomes) if (item) templates[item[0]] = item[1];
   _builtinTemplates = templates;
   return templates;
 }
@@ -2460,15 +2514,102 @@ function subtractBackground(gray, isLightSquare, lightBaselineB, darkBaselineB) 
   return out;
 }
 
+
+// In-page reference silhouettes extracted from the user-supplied Chess.com
+// green-board screenshot. All 12 piece types are represented (48x48 bitmaps).
+// No network request or model download is needed for this particular style.
+const CHESSCOM_CLASSIC_MASKS_B64 = {
+  'K': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP4AAAAAAP4AAAAAB//AAAAAB//AAAAAB//AAAAAB//AAAAAB//AAAAAB//AAAAAcP4eAAAD////wAAP////4AAf////8AA/////+AA//////AB//////AB//////AB//////AB/4/+H/gB/wf8H/gB/4f8H/AB/4f8P/AA/8f8f/AA/+f8/+AAf////+AAf////8AAP////4AAH////wAAD////gAAB////AAAA///+AAAA///+AAAB////gAAD////gAAD////2gAH/////gAH/////gAH////9gAH////9gAD/////gAAAAAAPgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'Q': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD4HwAAAAH+P8AAAAP+fsAAAAP3fuAAAAP3fuAAAAPvfeAAAANub8AAAOHuO8MAA/j+O4/AB7j2bx3gBvz+fz/gB/z/fz/gB/z73z/gB/z//75gB27//7XgA//9v/vAAf////uAAP/+/fcAAH///fcAAG+//e4AAD///94AAD///9wAAD///7wAAB///3wAABv//vgAAA///vgAAA3/+fAAAAf/9/AAAAf/z+AAAAf//+AAAA////AAAB5//nwAAD///+wgAD////7gAD////fgAD////fgAD////egAD////+gAD/////gAAAAAAHgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'R': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAHP8cAAAAfuO/AAAA9t23gAAA/v27gAAA///rgAAA+//rgAAA377bgAAA3///gAAA///3AAAAf///AAAAfwhPAAAAP//+AAAAH//8AAAAG/P8AAAAG/38AAAAG/78AAAAH/98AAAAH/98AAAAH//8AAAAH/+8AAAAH/+8AAAAP//+AAAAN//+AAAAN//eAAAAP//eAAAAP//eAAAAN//+AAAA////gAAB9//30AADv//++AADf///fgAD/////gAD/////gAD////+AAD////+gAD/////gAAAAAAHgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'B': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP4AAAAAAO4AAAAAAb8AAAAAAf8AAAAAAfcAAAAAAf4AAAAAAewAAAAAA/2AAAAAB9nAAAAAD/vgAAAAH7PwAAAAH/P4AAAAN3b8AAAAf3fsAAAAf/f+AAAA/+f+AAAA/+f2AAAA/+f3AAAA/+f3AAAA/333AAAB/333AAAA/7v/AAAA///vAAAA///vAAAA///eAAAA3//eAAAAf/++AAAAb/98AAAAP/78AAAAPgf4AAAAf//+AAAB////AAADv//7gAAD////wAAG////wAAH////wAAH////wAAGAAAAwAAH////wAAD////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'N': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAAAAB4AAAAAAD8AAAAAADeAAAAAAD/4AAAAAH9/AAAAAP//gAAAAf/94AAAAfP+8AAAA2//eAAAA///uAAAA/3/3AAABv//3AAAD//v/gAADf/P7gAAH/+v7wAAP/9v7wAAP/7v7wAAb/3/7wAAf6f/7wAAf37//wAAb/3/3wAAesO/3wAAP8d/vwAAB4///wAAAB//fwAAAD/+/wAAAH///gAAAG/9/gAAAHB//gAAAP///gAAA/wA/wAAA3///4AABv///4AAB////sAAB////sAAB////sAAB////8AAB////8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'P': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH4AAAAAAP+AAAAAAd/AAAAAA37AAAAAB//gAAAABv9gAAAAB/9gAAAAB/9gAAAAB/9gAAAAB/7gAAAAA33gAAAAA7PAAAAAB//gAAAAD//wAAAADf/wAAAADf7wAAAAD8PwAAAAB//gAAAAAZ+AAAAAAe+AAAAAA/fAAAAAA3vAAAAAB/3gAAAAD/7wAAAAP/88AAAAd//eAAAAf///AAAA3///AAAA///9gAABv///gAAB////gAABgAABgAAB////gAAB////gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'k': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP4AAAAAAP4AAAAAAP4AAAAAB//AAAAAB//AAAAAB//AAAAAB//AAAAAB//AAAAAB//AAAAA////AAAH////wAAP////4AAf////8AA/////+AA//////AB//////AB//////gB//////gB/5//P/gB/4f+H/gB/4f+P/gB/8f+P/gB/+f+f/AA//f+//AA/////+AAf////8AAP////8AAH////4AAD////wAAB////gAAA////AAAA////AAAB////gAAD////wAAH////wAAH////wAAH////wAAH////wAAH////wAAH////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'q': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD4HwAAAAH8P4AAAAP+f8AAAAP+f8AAAAP/f+AAAAP+f8AAAAP+f8AAAAH+P8AAAfD8P4/AA/j+Px/gB/z+fx/gB/z+fz/gB/z//z/gB/z//z/gB/z//z/gA/7//3/AAP////+AAP////8AAH////4AAH////4AAD////4AAD////wAAB////wAAB////gAAB////gAAA////AAAA////AAAAf///AAAAf//+AAAAf//+AAAA////AAAB////gAAD////wAAD////wAAD////4AAD////4AAD////4AAD////4AAD////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'r': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH8AAAAAfn8/AAAA/v+/gAAA/v+/gAAA/v+/gAAA////gAAA////gAAA////AAAAf///AAAAf///AAAAf///AAAAP//+AAAAH//8AAAAD//4AAAAH//8AAAAH//8AAAAH//8AAAAH//8AAAAH//8AAAAH//8AAAAH//8AAAAH//8AAAAP//8AAAAP//+AAAAP//+AAAAP//+AAAAP//+AAAAf///AAAA////gAAB////wAAD////4AAD////4AAD////4AAD////4AAD////4AAD////4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'b': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHwAAAAAAP4AAAAAAP8AAAAAAf8AAAAAAf8AAAAAAf8AAAAAAP4AAAAAAfwAAAAAA/zAAAAAB/3gAAAAD/nwAAAAH/v4AAAAH/v8AAAAP/P8AAAAP/f+AAAAf/f+AAAAf/f/AAAA//f/AAAA//f/AAAA//f/AAAA////AAAA////AAAA////AAAA////AAAA////AAAAf///AAAAf//+AAAAf//+AAAAP//8AAAAP//8AAAAP//8AAAA////AAAB////wAAD////wAAD////wAAD////4AAD////4AAD////4AAD////4AAD////4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'n': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAAAB4AAAAAAD8AAAAAAD+AAAAAAD/wAAAAAH/+AAAAAP//gAAAAf//wAAAA///4AAAA///8AAAA///+AAAB///+AAAB////AAAD////gAAD////gAAH////gAAP////wAAf////wAAf////wAA/////wAA/////wAA//3//wAAf8P//wAAP4f//wAAH4///wAAAB///wAAAD///gAAAH///gAAAH///gAAAP///gAAAP///AAAA////wAAB////4AAB////4AAB////4AAD////8AAD////8AAD////8AAD////8AAB////4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  'p': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwAAAAAAH8AAAAAAf/AAAAAAf/AAAAAA//gAAAAA//gAAAAB//gAAAAB//gAAAAB//gAAAAA//gAAAAA//gAAAAAf/AAAAAA//AAAAAB//wAAAAD//wAAAAD//wAAAAB//wAAAAB//wAAAAAP+AAAAAAf+AAAAAAf/AAAAAA//AAAAAA//gAAAAD//wAAAAH//8AAAAP//+AAAAf///AAAA////AAAA////gAAA////gAAA////gAAB////gAAB////gAAA////gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+};
+let _chesscomClassicMasks=null;
+function chessComMasks(){
+  if(_chesscomClassicMasks)return _chesscomClassicMasks;
+  const result={};
+  for(const [piece,encoded] of Object.entries(CHESSCOM_CLASSIC_MASKS_B64)){
+    const raw=atob(encoded),bits=new Float32Array(48*48);
+    for(let i=0;i<bits.length;i++)bits[i]=(raw.charCodeAt(i>>3)>>(7-(i&7)))&1;
+    result[piece]=bits;
+  }
+  _chesscomClassicMasks=result;
+  return result;
+}
+function chessComCellMask(imgEl,region,row,col){
+  const sz=region.size/8,can=document.createElement('canvas');
+  can.width=48;can.height=48;
+  const ctx=can.getContext('2d',{willReadFrequently:true});
+  ctx.drawImage(imgEl,region.x+col*sz,region.y+row*sz,sz,sz,0,0,48,48);
+  const d=ctx.getImageData(0,0,48,48).data;
+  const corners=[[],[],[]];
+  for(const [x0,y0] of [[4,4],[40,4],[4,40],[40,40]]){
+    for(let y=y0;y<y0+4;y++)for(let x=x0;x<x0+4;x++){
+      const i=(y*48+x)*4;
+      for(let k=0;k<3;k++)corners[k].push(d[i+k]);
+    }
+  }
+  const bg=corners.map(a=>{a.sort((a,b)=>a-b);return a[a.length>>1];});
+  const mask=new Float32Array(48*48);
+  for(let y=4;y<44;y++)for(let x=5;x<43;x++){
+    const i=y*48+x,p=i*4;
+    const r=d[p]-bg[0],g=d[p+1]-bg[1],b=d[p+2]-bg[2];
+    if(r*r+g*g+b*b>28*28)mask[i]=1;
+  }
+  return mask;
+}
+function chessComGreenBoardStyle(imgEl,region){
+  // A false positive on another chessboard theme would be undesirable:
+  // require several actual green squares, including near-corner backgrounds.
+  const can=document.createElement('canvas');can.width=160;can.height=160;
+  const ctx=can.getContext('2d',{willReadFrequently:true});
+  ctx.drawImage(imgEl,region.x,region.y,region.size,region.size,0,0,160,160);
+  const px=ctx.getImageData(0,0,160,160).data;
+  let green=0;
+  for(let r=0;r<8;r++)for(let f=0;f<8;f++){
+    const x=Math.floor((f+0.22)*20), y=Math.floor((r+0.22)*20),i=(y*160+x)*4;
+    if(isChessComGreen(px[i],px[i+1],px[i+2])) green++;
+  }
+  return green>=12;
+}
+function classifyChessComClassic(imgEl,region,occupiedSquares,colorHints){
+  if(!region || !chessComGreenBoardStyle(imgEl,region))return {};
+  const templates=chessComMasks(),result={};
+  for(const index of occupiedSquares){
+    const row=index>>3,col=index&7;
+    const a=chessComCellMask(imgEl,region,row,col);
+    let bestName=null,best=-2,second=-2;
+    const side=colorHints[index];
+    for(const [name,template] of Object.entries(templates)){
+      if(side==='?W' && name!==name.toUpperCase())continue;
+      if(side==='?B' && name!==name.toLowerCase())continue;
+      const score=ncc(a,template);
+      if(score>best){second=best;best=score;bestName=name;}
+      else if(score>second)second=score;
+    }
+    // Refuse to guess if the screenshot uses a different set of piece artwork.
+    if(best>=0.74 && best-second>=0.045)result[index]=bestName;
+  }
+  return result;
+}
+
 // Given an image with confirmed piece placements (squares array), save the per-piece templates.
 // Returns an object: { 'K': [gray_array, ...], 'Q': [...], ..., 'p': [...] }
 // Multiple templates per piece allowed (use first one we see).
-function learnTemplatesFromBoard(imgEl, region, squares) {
+function learnTemplatesFromBoard(imgEl, region, squares, flipped = false) {
   const templates = {};
   for (let r_idx = 0; r_idx < 8; r_idx++) {
     for (let f_idx = 0; f_idx < 8; f_idx++) {
       const idx = r_idx * 8 + f_idx;
-      const piece = squares[idx];
+      const piece = squares[flipped ? 63 - idx : idx];
       if (!piece || piece === '?W' || piece === '?B') continue;
       // Don't overwrite existing template — first sample wins (could improve with averaging)
       if (templates[piece]) continue;
@@ -2480,10 +2621,10 @@ function learnTemplatesFromBoard(imgEl, region, squares) {
 
 // Try to identify piece types using saved templates.
 // Returns a map: { squareIdx: pieceType, ... }, only for cells where NCC > threshold.
-function classifyWithTemplates(imgEl, region, occupiedSquares, templates) {
+function classifyWithTemplates(imgEl, region, occupiedSquares, templates, colorHints) {
   if (!templates || Object.keys(templates).length === 0) return {};
   const results = {};
-  const matchThreshold = 0.50;  // NCC must exceed this to count as a confident match
+  const matchThreshold = 0.62;  // otherwise leave unknown instead of guessing
 
   // For each occupied square, find the template with highest NCC
   for (const sqIdx of occupiedSquares) {
@@ -2492,7 +2633,10 @@ function classifyWithTemplates(imgEl, region, occupiedSquares, templates) {
     const cellGray = extractCellGray(imgEl, region, r_idx, f_idx);
 
     let bestPiece = null, bestScore = -2;
+    const desiredColor = colorHints ? colorHints[sqIdx] : null;
     for (const [piece, tmplArr] of Object.entries(templates)) {
+      if (desiredColor === '?W' && piece !== piece.toUpperCase()) continue;
+      if (desiredColor === '?B' && piece !== piece.toLowerCase()) continue;
       const tmpl = new Float32Array(tmplArr);
       const score = ncc(cellGray, tmpl);
       if (score > bestScore) {
@@ -2579,7 +2723,7 @@ function openAddPuzzleModal(existingPuzzle) {
           <div style="font-size:32px;margin-bottom:6px;">📷</div>
           <div>Click to choose an image, or drag-and-drop here</div>
           <div style="font-size:12px;color:var(--ink-faded);margin-top:6px;">
-            Lichess / chess.com screenshots, or phone photos of physical boards
+            Best with flat, straight-on Lichess / chess.com screenshots
           </div>
         </div>
         <div id="ap-crop-container" style="display:none; position:relative; max-width:100%; user-select:none;">
@@ -2592,6 +2736,13 @@ function openAddPuzzleModal(existingPuzzle) {
             <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#fff; font-family:'Cormorant Garamond',serif; font-size:13px; text-shadow:0 0 4px rgba(0,0,0,0.8); pointer-events:none; background:rgba(0,0,0,0.3); padding:2px 8px; border-radius:3px;">drag center · corners to resize</div>
           </div>
         </div>
+      </div>
+      <div style="font-size:13px;color:var(--ink-soft);margin-top:8px;display:flex;gap:8px;align-items:center;">
+        <label for="ap-img-orientation">Board orientation:</label>
+        <select id="ap-img-orientation" style="padding:5px;background:var(--paper);border:1px solid var(--paper-edge);">
+          <option value="white">White at bottom (default)</option>
+          <option value="black">Black at bottom (flipped)</option>
+        </select>
       </div>
       <div id="ap-img-status" class="ed-status" style="display:none;"></div>
       <div class="modal-actions" style="border-top:none;padding-top:8px;margin-top:8px;">
@@ -2772,7 +2923,9 @@ function openAddPuzzleModal(existingPuzzle) {
         // Prefer OpenCV-based detection if available (more accurate);
         // fall back to the heuristic detector otherwise.
         let detected = null;
-        if (_cvLoadState === 'ready') {
+        // Prioritize the reliable palette/grid detector for Chess.com green boards.
+        detected = detectChessComGreenBoard(imgPreview);
+        if (!detected && _cvLoadState === 'ready') {
           try { detected = detectBoardWithOpenCV(imgPreview); }
           catch (e) { console.warn('OpenCV detection error:', e); }
         }
@@ -2807,10 +2960,10 @@ function openAddPuzzleModal(existingPuzzle) {
         }
         const reader = new FileReader();
         reader.onload = (ev) => {
+          imgPreview.onload = afterImageLoaded;
           imgPreview.src = ev.target.result;
           imgPrompt.style.display = 'none';
           cropContainer.style.display = 'block';
-          imgPreview.onload = afterImageLoaded;
         };
         reader.readAsDataURL(file);
       };
@@ -3005,7 +3158,17 @@ function openAddPuzzleModal(existingPuzzle) {
         const origText = recognizeBtn.textContent;
         recognizeBtn.textContent = 'Recognizing…';
 
-        const result = recognizeBoardFromImage(loadedImage, cropRegion);
+        let result;
+        try { result = recognizeBoardFromImage(loadedImage, cropRegion); }
+        catch (e) {
+          console.error('Image recognition failed:',e);
+          imgStatus.textContent = '⚠ Could not read image pixels: ' + (e.message || e);
+          imgStatus.className = 'ed-status err';
+          imgStatus.style.display = '';
+          recognizeBtn.disabled = false;
+          recognizeBtn.textContent = origText;
+          return;
+        }
         if (!result || result.confidence < 0.2) {
           recognizeBtn.disabled = false;
           recognizeBtn.textContent = origText;
@@ -3038,18 +3201,29 @@ function openAddPuzzleModal(existingPuzzle) {
 
         const learnedTemplates = (state.profile && state.profile.pieceTemplates) || {};
         let builtinTemplates = {};
-        try {
-          builtinTemplates = await getBuiltinTemplates();
-        } catch (e) { console.warn('No built-in templates:', e); }
-
-        // Merge: learned takes precedence over built-in
-        const allTemplates = { ...builtinTemplates, ...learnedTemplates };
+        // Reference images are optional; only fetch them if Chess.com shape
+        // recognition leaves pieces unnamed (handled below).
+        const allTemplates = { ...learnedTemplates };
 
         let typedCount = 0;
-        if (Object.keys(allTemplates).length > 0) {
-          const typeMap = classifyWithTemplates(loadedImage, cropRegion, occupiedSquares, allTemplates);
+        // First try the built-in Chess.com Classic silhouette library. Unlike
+        // generic gray-scale images, these compare background-free shapes.
+        const shapeMap = classifyChessComClassic(loadedImage, cropRegion, occupiedSquares, result.squares);
+        for (const [sqIdx, piece] of Object.entries(shapeMap)) {
+          result.squares[Number(sqIdx)] = piece;
+          typedCount++;
+        }
+        // Unrecognized pieces still use learned/Wikipedia templates. Never
+        // overwrite higher-confidence Chess.com silhouette matches.
+        const leftover = occupiedSquares.filter(i => !shapeMap[i]);
+        if(leftover.length && !Object.keys(learnedTemplates).length){
+          try { Object.assign(allTemplates, await getBuiltinTemplates()); }
+          catch (e) { console.warn('No built-in templates:', e); }
+        }
+        if (leftover.length && Object.keys(allTemplates).length > 0) {
+          const typeMap = classifyWithTemplates(loadedImage, cropRegion, leftover, allTemplates, result.squares);
           for (const [sqIdx, piece] of Object.entries(typeMap)) {
-            result.squares[parseInt(sqIdx, 10)] = piece;
+            result.squares[Number(sqIdx)] = piece;
             typedCount++;
           }
         }
@@ -3057,6 +3231,7 @@ function openAddPuzzleModal(existingPuzzle) {
         // Remember image+region for later learning when the user saves the puzzle
         editor.lastImageEl = loadedImage;
         editor.lastRegion = cropRegion ? { ...cropRegion } : null;
+        editor.lastImageFlipped = $('#ap-img-orientation').value === 'black';
 
         // Status message
         const totalDetected = result.pieceCount;
@@ -3071,7 +3246,7 @@ function openAddPuzzleModal(existingPuzzle) {
         }
         imgStatus.className = 'ed-status ok';
         imgStatus.style.display = '';
-        editor.squares = result.squares.slice();
+        editor.squares = editor.lastImageFlipped ? result.squares.slice().reverse() : result.squares.slice();
         recognizeBtn.disabled = false;
         recognizeBtn.textContent = origText;
         document.querySelector('.ap-tab[data-tab="editor"]').click();
@@ -3295,7 +3470,7 @@ function openAddPuzzleModal(existingPuzzle) {
         // Learn piece templates from this confirmed board, if we have a source image
         if (editor.lastImageEl && editor.squares) {
           try {
-            const newTemplates = learnTemplatesFromBoard(editor.lastImageEl, editor.lastRegion, editor.squares);
+            const newTemplates = learnTemplatesFromBoard(editor.lastImageEl, editor.lastRegion, editor.squares, !!editor.lastImageFlipped);
             if (!state.profile.pieceTemplates) state.profile.pieceTemplates = {};
             // Merge: existing templates win, new ones fill in gaps
             for (const [piece, tmpl] of Object.entries(newTemplates)) {
