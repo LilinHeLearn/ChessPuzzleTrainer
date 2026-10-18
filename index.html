@@ -2787,11 +2787,15 @@ function openAddPuzzleModal(existingPuzzle) {
           <option value="black">Black at bottom (flipped)</option>
         </select>
       </div>
+      <label style="display:flex;gap:9px;align-items:flex-start;margin-top:10px;font-size:13px;color:var(--ink-soft);cursor:pointer;">
+        <input type="checkbox" id="ap-img-force" style="margin-top:4px;flex-shrink:0;">
+        <span><strong>Trust my green box (manual override)</strong> — try piece recognition even if the board-pattern test fails. Only enable after aligning the green box with all 64 squares. Always verify the result in the editor.</span>
+      </label>
       <div id="ap-img-status" class="ed-status" style="display:none;"></div>
       <div class="modal-actions" style="border-top:none;padding-top:8px;margin-top:8px;">
         <button class="subtle" id="ap-img-clear">Clear image</button>
         <button class="primary" id="ap-img-recognize">Recognize → editor</button>
-        <span style="font-size:12px;color:#41633d;font-weight:bold;align-self:center" id="recognition-build">Recognition V4 · auto-align</span>
+        <span style="font-size:12px;color:#41633d;font-weight:bold;align-self:center" id="recognition-build">Recognition V5 · manual override</span>
       </div>
     </div>
 
@@ -3234,13 +3238,23 @@ function openAddPuzzleModal(existingPuzzle) {
           recognizeBtn.textContent = origText;
           return;
         }
-        if (!result || result.confidence < 0.2) {
+        const manualOverride = $('#ap-img-force').checked;
+        if ((!result || result.confidence < 0.2) && manualOverride && cropRegion) {
+          // User-confirmed crop: retry with a more forgiving checkerboard threshold.
+          // This cannot guarantee accurate piece occupancy, so require editor review.
+          try {
+            result = recognizeBoardFromImage(loadedImage, cropRegion, true);
+          } catch (e) {
+            console.warn('Manual override recognition failed:', e);
+          }
+        }
+        if (!result || (result.confidence < 0.2 && !manualOverride)) {
           recognizeBtn.disabled = false;
           recognizeBtn.textContent = origText;
           imgStatus.innerHTML =
             '⚠ The green box doesn\u2019t look like a chess board. ' +
             'Drag and resize it so it covers ONLY the 8×8 board (no clocks, names, or buttons), ' +
-            'then click Recognize again. ' +
+            'then click Recognize again. If it is already aligned, check “Trust my green box” below the image and retry. ' +
             '<br><br>' +
             '<a href="#" id="ap-skip-recognition" style="color:var(--oxblood);text-decoration:underline;">Or skip and place pieces manually →</a>';
           imgStatus.className = 'ed-status warn';
@@ -5125,5 +5139,3 @@ window.addEventListener('DOMContentLoaded', init);
 </script>
 </body>
 </html>
-
-
